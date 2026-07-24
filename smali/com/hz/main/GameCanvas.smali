@@ -7475,7 +7475,7 @@
 .end method
 
 .method public run()V
-    .locals 11
+    .locals 12
 
     .prologue
     const/4 v9, 0x0
