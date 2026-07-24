@@ -898,8 +898,7 @@
     :cond_2
     iget-object v4, p0, Ljavax/microedition/lcdui/Canvas;->holder:Landroid/view/SurfaceHolder;
 
-    .line 331
-    invoke-interface {v4, v6}, Landroid/view/SurfaceHolder;->lockCanvas(Landroid/graphics/Rect;)Landroid/graphics/Canvas;
+    invoke-interface {v4}, Landroid/view/SurfaceHolder;->lockHardwareCanvas()Landroid/graphics/Canvas;
 
     move-result-object v0
 

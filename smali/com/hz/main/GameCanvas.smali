@@ -7640,15 +7640,15 @@
 
     .line 453
     .local v5, "time":J
-    const/16 v7, 0x41
+    const/4 v7, 0x0
 
     neg-long v8, v5
 
     long-to-int v8, v8
 
-    const/4 v9, 0x5
+    const/4 v9, 0x0
 
-    const/16 v10, 0x41
+    const/4 v10, 0x0
 
     invoke-static {v7, v8, v9, v10}, Lcom/hz/common/Tool;->sumValue(IIII)I
 
