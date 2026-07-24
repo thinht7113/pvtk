@@ -241,6 +241,8 @@
 
 .field private static worldShowTitle:Ljava/lang/String;
 
+.field public static lastTime:J
+
 
 # instance fields
 .field data:Ljava/lang/String;
@@ -7587,7 +7589,44 @@
 
     .line 447
     :cond_3
+    # --- SPEED HACK X8 ---
+    sget-wide v5, Lcom/hz/main/GameCanvas;->lastTime:J
+    
+    const-wide/16 v7, 0x0
+    cmp-long v7, v5, v7
+    if-nez v7, :calc_delta
+    sput-wide v3, Lcom/hz/main/GameCanvas;->lastTime:J
+    move-wide v5, v3
+    
+    :calc_delta
+    sub-long v7, v3, v5
+    const-wide/16 v9, 0x8
+    div-long/2addr v7, v9
+    long-to-int v11, v7
+    
+    if-lez v11, :skip_logic
+    
+    const/16 v7, 0x14
+    if-le v11, v7, :normal_update
+    
+    const/16 v11, 0x14
+    sput-wide v3, Lcom/hz/main/GameCanvas;->lastTime:J
+    goto :loop_logic_start
+    
+    :normal_update
+    int-to-long v7, v11
+    const-wide/16 v9, 0x8
+    mul-long/2addr v7, v9
+    add-long/2addr v5, v7
+    sput-wide v5, Lcom/hz/main/GameCanvas;->lastTime:J
+    
+    :loop_logic_start
     invoke-virtual {p0}, Lcom/hz/main/GameCanvas;->logic()V
+    add-int/lit8 v11, v11, -0x1
+    if-gtz v11, :loop_logic_start
+    
+    :skip_logic
+    # --- SPEED HACK END ---
 
     .line 448
     invoke-virtual {p0}, Lcom/hz/main/GameCanvas;->doRepaint()V
