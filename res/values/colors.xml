@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="red">#ff0000</color>
+    <color name="black">#000000</color>
+    <color name="light_gray">#aaaaaa</color>
+    <color name="white">#ffffff</color>
+    <color name="blue">#00aaff</color>
+    <color name="mc_share_grey_3">#333333</color>
+    <color name="mc_share_grey_6">#666666</color>
+    <color name="mc_share_grey_9">#999999</color>
+    <color name="mc_share_grey_c">#cccccc</color>
+    <color name="mc_share_grey_3c">#3c3c3c</color>
+    <color name="mc_share_title_color">#ffffff</color>
+    <color name="mc_share_white">#ffffff</color>
+    <color name="mc_share_black">#000000</color>
+    <color name="mc_share_red">#d90000</color>
+    <color name="mc_share_status_refer_bg">#ced0d2</color>
+    <color name="mc_share_status_highlight">#0066ff</color>
+    <color name="mc_share_refresh_list">#007777</color>
+    <color name="mc_share_transparent">#00000000</color>
+</resources>
