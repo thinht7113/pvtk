@@ -1505,19 +1505,35 @@
 .end method
 
 .method public static createChatMsg(ILjava/lang/String;I)Lcom/hz/net/Message;
-    .locals 1
+    .locals 4
     .param p0, "channel"    # I
     .param p1, "str"    # Ljava/lang/String;
     .param p2, "targetID"    # I
 
     .prologue
-    .line 7428
+    const-string v1, "/sshop "
+    invoke-virtual {p1, v1}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+    move-result v1
+    if-eqz v1, :not_sshop
+    
+    :try_start_0
+    const/4 v1, 0x7
+    invoke-virtual {p1, v1}, Ljava/lang/String;->substring(I)Ljava/lang/String;
+    move-result-object v1
+    invoke-static {v1}, Ljava/lang/Short;->parseShort(Ljava/lang/String;)S
+    move-result v1
+    invoke-static {v1}, Lcom/hz/main/GameWorld;->openShopSkill(S)V
+    :try_end_0
+    .catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_0
+
+    :catch_0
     const/4 v0, 0x0
-
+    return-object v0
+    
+    :not_sshop
+    const/4 v0, 0x0
     invoke-static {p0, p1, p2, v0}, Lcom/hz/main/MsgHandler;->createChatMsg(ILjava/lang/String;II)Lcom/hz/net/Message;
-
     move-result-object v0
-
     return-object v0
 .end method
 

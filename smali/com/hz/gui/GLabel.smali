@@ -3090,7 +3090,7 @@
 .end method
 
 .method public setText(Ljava/lang/String;)V
-    .locals 0
+    .locals 2
     .param p1, "s"    # Ljava/lang/String;
 
     .prologue

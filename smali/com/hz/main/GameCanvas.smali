@@ -7600,7 +7600,7 @@
     
     :calc_delta
     sub-long v7, v3, v5
-    const-wide/16 v9, 0x8
+    const-wide/16 v9, 0xc
     div-long/2addr v7, v9
     long-to-int v11, v7
     
@@ -7615,7 +7615,7 @@
     
     :normal_update
     int-to-long v7, v11
-    const-wide/16 v9, 0x8
+    const-wide/16 v9, 0xc
     mul-long/2addr v7, v9
     add-long/2addr v5, v7
     sput-wide v5, Lcom/hz/main/GameCanvas;->lastTime:J

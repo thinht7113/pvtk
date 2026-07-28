@@ -2376,7 +2376,7 @@
 .end method
 
 .method public setText(Ljava/lang/String;)V
-    .locals 1
+    .locals 2
     .param p1, "_text"    # Ljava/lang/String;
 
     .prologue
