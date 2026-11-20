@@ -1,0 +1,284 @@
+{
+  "title": "Lộ trình Auto Leveling PVTK (24 bước)",
+  "created_at": "2026-09-03 11:31:20",
+  "target_server": "123.30.142.163:10010",
+  "total_steps": 23,
+  "steps": [
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x138F",
+      "opcode": "0x138F",
+      "params": {
+        "payload_hex": ""
+      },
+      "raw_hex_b64": "E48=",
+      "delay": 2.27,
+      "timestamp": 1788409124.41
+    },
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x0001",
+      "opcode": "0x0001",
+      "params": {
+        "payload_hex": "271a8e674d3dc5770009a863050005593c02"
+      },
+      "raw_hex_b64": "AAEnGo5nTT3FdwAJqGMFAAVZPAI=",
+      "delay": 0.5,
+      "timestamp": 1788409124.55
+    },
+    {
+      "action": "change_map",
+      "desc": "Chuyển sang Map #4",
+      "opcode": "0x290A",
+      "params": {
+        "map_id": 4,
+        "payload_hex": "00041e0400000040",
+        "opcode": 10506
+      },
+      "raw_hex_b64": "KQoABB4EAAAAQA==",
+      "delay": 2.0,
+      "timestamp": 1788409131.17
+    },
+    {
+      "action": "deliver_quest",
+      "desc": "Trả Q #2199 (NPC #51)",
+      "opcode": "0x38A7",
+      "params": {
+        "npc_id": 51,
+        "mission_id": 2199,
+        "reward_id": -1
+      },
+      "raw_hex_b64": "OKcAMwiX/////w==",
+      "delay": 2.0,
+      "timestamp": 1788409138.2
+    },
+    {
+      "action": "accept_quest",
+      "desc": "Nhận Q #2201 (NPC #51)",
+      "opcode": "0x38A6",
+      "params": {
+        "npc_id": 51,
+        "mission_id": 2201
+      },
+      "raw_hex_b64": "OKYAMwiZ",
+      "delay": 0.79,
+      "timestamp": 1788409138.99
+    },
+    {
+      "action": "deliver_quest",
+      "desc": "Trả Q #2201 (NPC #2)",
+      "opcode": "0x38A7",
+      "params": {
+        "npc_id": 2,
+        "mission_id": 2201,
+        "reward_id": -1
+      },
+      "raw_hex_b64": "OKcAAgiZ/////w==",
+      "delay": 2.24,
+      "timestamp": 1788409141.22
+    },
+    {
+      "action": "accept_quest",
+      "desc": "Nhận Q #2202 (NPC #2)",
+      "opcode": "0x38A6",
+      "params": {
+        "npc_id": 2,
+        "mission_id": 2202
+      },
+      "raw_hex_b64": "OKYAAgia",
+      "delay": 0.88,
+      "timestamp": 1788409142.1
+    },
+    {
+      "action": "fight",
+      "desc": "Đánh Quái (0x30D5)",
+      "opcode": "0x30D5",
+      "params": {
+        "group_id": 0,
+        "is_remote": false,
+        "opcode": 12501
+      },
+      "raw_hex_b64": "MNU=",
+      "delay": 1.29,
+      "timestamp": 1788409143.39
+    },
+    {
+      "action": "fight_result",
+      "desc": "Báo cáo chiến thắng đánh quái",
+      "opcode": "0x30D6",
+      "params": {
+        "payload_hex": "0000011d000000810000011d00000081000307dc000200000201030000020106"
+      },
+      "raw_hex_b64": "MNYAAAEdAAAAgQAAAR0AAACBAAMH3AACAAACAQMAAAIBBg==",
+      "delay": 1.53,
+      "timestamp": 1788409144.92
+    },
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x2AFC",
+      "opcode": "0x2AFC",
+      "params": {
+        "payload_hex": ""
+      },
+      "raw_hex_b64": "Kvw=",
+      "delay": 0.5,
+      "timestamp": 1788409145.0
+    },
+    {
+      "action": "fight",
+      "desc": "Đánh Quái (0x30D5)",
+      "opcode": "0x30D5",
+      "params": {
+        "group_id": 0,
+        "is_remote": false,
+        "opcode": 12501
+      },
+      "raw_hex_b64": "MNU=",
+      "delay": 2.0,
+      "timestamp": 1788409152.34
+    },
+    {
+      "action": "fight_result",
+      "desc": "Báo cáo chiến thắng đánh quái",
+      "opcode": "0x30D6",
+      "params": {
+        "payload_hex": "0000011d000000810000011d00000081000407dc000200000201030000020106"
+      },
+      "raw_hex_b64": "MNYAAAEdAAAAgQAAAR0AAACBAAQH3AACAAACAQMAAAIBBg==",
+      "delay": 1.28,
+      "timestamp": 1788409153.62
+    },
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x2AFC",
+      "opcode": "0x2AFC",
+      "params": {
+        "payload_hex": ""
+      },
+      "raw_hex_b64": "Kvw=",
+      "delay": 0.31,
+      "timestamp": 1788409153.93
+    },
+    {
+      "action": "deliver_quest",
+      "desc": "Trả Q #2202 (NPC #2)",
+      "opcode": "0x38A7",
+      "params": {
+        "npc_id": 2,
+        "mission_id": 2202,
+        "reward_id": 2001
+      },
+      "raw_hex_b64": "OKcAAgiaAAAH0Q==",
+      "delay": 1.73,
+      "timestamp": 1788409155.66
+    },
+    {
+      "action": "accept_quest",
+      "desc": "Nhận Q #2203 (NPC #2)",
+      "opcode": "0x38A6",
+      "params": {
+        "npc_id": 2,
+        "mission_id": 2203
+      },
+      "raw_hex_b64": "OKYAAgib",
+      "delay": 0.85,
+      "timestamp": 1788409156.51
+    },
+    {
+      "action": "deliver_quest",
+      "desc": "Trả Q #2203 (NPC #5)",
+      "opcode": "0x38A7",
+      "params": {
+        "npc_id": 5,
+        "mission_id": 2203,
+        "reward_id": -1
+      },
+      "raw_hex_b64": "OKcABQib/////w==",
+      "delay": 1.94,
+      "timestamp": 1788409158.44
+    },
+    {
+      "action": "accept_quest",
+      "desc": "Nhận Q #2204 (NPC #5)",
+      "opcode": "0x38A6",
+      "params": {
+        "npc_id": 5,
+        "mission_id": 2204
+      },
+      "raw_hex_b64": "OKYABQic",
+      "delay": 0.75,
+      "timestamp": 1788409159.19
+    },
+    {
+      "action": "fight",
+      "desc": "Đánh Quái (0x30D5)",
+      "opcode": "0x30D5",
+      "params": {
+        "group_id": 0,
+        "is_remote": false,
+        "opcode": 12501
+      },
+      "raw_hex_b64": "MNU=",
+      "delay": 2.35,
+      "timestamp": 1788409161.55
+    },
+    {
+      "action": "fight_result",
+      "desc": "Báo cáo chiến thắng đánh quái",
+      "opcode": "0x30D6",
+      "params": {
+        "payload_hex": "0000011d000000810000011d00000081000507dd000200000201000000020104"
+      },
+      "raw_hex_b64": "MNYAAAEdAAAAgQAAAR0AAACBAAUH3QACAAACAQAAAAIBBA==",
+      "delay": 1.45,
+      "timestamp": 1788409163.0
+    },
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x2AFC",
+      "opcode": "0x2AFC",
+      "params": {
+        "payload_hex": ""
+      },
+      "raw_hex_b64": "Kvw=",
+      "delay": 0.28,
+      "timestamp": 1788409163.28
+    },
+    {
+      "action": "fight",
+      "desc": "Đánh Quái (0x30D5)",
+      "opcode": "0x30D5",
+      "params": {
+        "group_id": 0,
+        "is_remote": false,
+        "opcode": 12501
+      },
+      "raw_hex_b64": "MNU=",
+      "delay": 1.69,
+      "timestamp": 1788409168.34
+    },
+    {
+      "action": "fight_result",
+      "desc": "Báo cáo chiến thắng đánh quái",
+      "opcode": "0x30D6",
+      "params": {
+        "payload_hex": "0000011d000000810000011d0000007b000607dd000200000201000000020104"
+      },
+      "raw_hex_b64": "MNYAAAEdAAAAgQAAAR0AAAB7AAYH3QACAAACAQAAAAIBBA==",
+      "delay": 1.44,
+      "timestamp": 1788409169.78
+    },
+    {
+      "action": "raw_packet",
+      "desc": "Tương tác Option 0x2AFC",
+      "opcode": "0x2AFC",
+      "params": {
+        "payload_hex": ""
+      },
+      "raw_hex_b64": "Kvw=",
+      "delay": 0.32,
+      "timestamp": 1788409170.09
+    }
+  ],
+  "step_count": 23
+}

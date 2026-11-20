@@ -1,0 +1,2 @@
+# Định dạng: username|password hoặc username|password|socks5://ip:port
+example_user|example_pass

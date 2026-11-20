@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Secrets, configs & accounts (never commit real tokens or passwords)
+.env
+config.json
+config_247.json
+accounts*.txt
+!accounts.example.txt
+
+# Runtime logs, state, proxies & caches
+bot_247.log*
+sessionIDs.txt
+proxies_*.txt
+storage/*.json
+storage/*.png
+scratch/
+*.bak
+*.tmp
+*.zip
+
+# Ad-hoc local debug/inspection scripts
+check_*.py
+inspect_*.py
+test_*.py
+debug_*.py
+analyze_*.py
+parse_*.py
+quick_inspect.py
+verify_state.py

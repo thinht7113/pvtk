@@ -1,0 +1,60 @@
+{
+  "telegram": {
+    "bot_token": "",
+    "chat_id": "",
+    "enabled": true,
+    "admin_ids": []
+  },
+  "server": {
+    "name": "Tuyệt Vô Thần (Cụm 3)",
+    "game_host": "123.30.142.210",
+    "game_port": 10000,
+    "master_host": "123.30.142.219",
+    "master_port": 30000
+  },
+  "accounts_file": "accounts_tuyet_vo_than.txt",
+  "special_accounts_file": "accountsNV.txt",
+  "use_proxy": true,
+  "proxy_file": "proxies_good.txt",
+  "special_accounts_count": 3,
+  "special_roles": {
+    "item_watcher_username": "thinht7113",
+    "char_watcher_username": "toilabaon",
+    "lixi_watcher_usernames": [
+      "thinht7113",
+      "toilabaon",
+      "thinht7114"
+    ]
+  },
+  "schedule": {
+    "daily_relogin": "00:01",
+    "quiz_start": "22:01",
+    "quiz_end": "22:30",
+    "lottery_start": "08:01",
+    "auto_sell_time": "23:01",
+    "auto_sell_keywords": [
+      "Dược",
+      "Thuốc",
+      "Ngày",
+      "Loa"
+    ],
+    "status_report_interval_minutes": 180,
+    "quiz_min_level": 0,
+    "lottery_min_level": 30,
+    "login_lottery_time": "07:01",
+    "login_lottery_min_level": 35
+  },
+  "threading": {
+    "max_concurrent": 0,
+    "comment": "max_concurrent: 0 có nghĩa là chạy tối đa số luồng = tổng số tài khoản"
+  },
+  "market_watcher": {
+    "scan_interval_sec": 15,
+    "item_notify": true,
+    "item_min_grade": 0,
+    "tracked_categories": [
+      "Tất cả"
+    ],
+    "comment": "tracked_categories: ['Tất cả'] hoặc chọn lọc ['Kiếm', 'Đao', 'Súng', 'Trượng', 'Cung', 'Nặng', 'Trường Thương', 'PhápKhí', 'Hộ giáp', 'SứcPhẩm', 'Pet', 'Khảm', 'Vật liệu', 'Khác'] | item_min_grade: 0 (Tất cả), 1 (Xanh lá+), 2 (Lam+), 3 (Cam+), 4 (Tím) | scan_interval_sec: chu kỳ quét sàn (15s)"
+  }
+}
