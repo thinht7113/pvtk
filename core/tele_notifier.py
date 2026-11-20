@@ -107,6 +107,12 @@ def split_telegram_message(text: str, max_len: int = 4000) -> List[str]:
     return chunks
 
 
+_FLOOD_WAIT_UNTIL = 0.0
+
+def get_flood_wait_remaining() -> float:
+    global _FLOOD_WAIT_UNTIL
+    return max(0.0, _FLOOD_WAIT_UNTIL - time.time())
+
 def telegram_api_post(
     token: str,
     method: str,
@@ -118,8 +124,13 @@ def telegram_api_post(
     Calls Telegram Bot API via HTTPS POST with automatic 429 rate-limit backoff and error logging.
     Returns: (success: bool, response_json: Optional[dict], error_description: str)
     """
+    global _FLOOD_WAIT_UNTIL
     if not token:
         return False, None, "Missing bot_token"
+
+    rem = get_flood_wait_remaining()
+    if rem > 0 and method == "sendMessage":
+        return False, None, f"Telegram flood wait active ({int(rem)}s remaining)"
 
     url = f"https://api.telegram.org/bot{token}/{method}"
     payload = json.dumps(params or {}).encode("utf-8")
@@ -149,6 +160,13 @@ def telegram_api_post(
                 retry_after = 2.0
                 if isinstance(data, dict):
                     retry_after = float(data.get("parameters", {}).get("retry_after", 3.0))
+                if retry_after > 60.0:
+                    _FLOOD_WAIT_UNTIL = time.time() + retry_after
+                    mins = int(retry_after // 60)
+                    secs = int(retry_after % 60)
+                    print(f"[TG API] ⚠️ Telegram áp đặt giới hạn chống Spam: yêu cầu chờ {mins} phút {secs} giây. Tạm dừng gửi tin để Telegram mở lại tài khoản bot.")
+                    return False, data, f"429 Too Many Requests (flood wait {int(retry_after)}s)"
+
                 retry_after = max(1.0, min(retry_after, 30.0))
                 print(f"[TG API] HTTP 429 Rate limited ({method}). Retrying after {retry_after}s (attempt {attempt + 1}/{max_retries + 1})...")
                 if attempt < max_retries:
