@@ -17,6 +17,7 @@ import os
 import json
 import time
 import threading
+import html
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
@@ -165,11 +166,12 @@ class PVTKScheduler:
                     self.last_triggered_auto_sell_date = today_str
                     self._save_state()
                     kw_display = ", ".join(self.auto_sell_keywords)
+                    s_kw_display = html.escape(kw_display)
                     print(f"\n[SCHEDULER {now_str}] 💰 Bắt đầu Job Tự động bán vật phẩm theo lịch ({self.auto_sell_time} - [{kw_display}])...")
                     if self.telegram_bot:
                         self.telegram_bot.send_message(
                             f"💰 <b>[{now_str}] TỰ ĐỘNG BÁN VẬT PHẨM THEO LỊCH TRÌNH</b>\n"
-                            f"Hệ thống đang tự động bán các vật phẩm khớp từ khóa: <code>{kw_display}</code> cho toàn bộ tài khoản..."
+                            f"Hệ thống đang tự động bán các vật phẩm khớp từ khóa: <code>{s_kw_display}</code> cho toàn bộ tài khoản..."
                         )
                     if self.context and hasattr(self.context, "delete_items"):
                         self.context.delete_items(
@@ -204,7 +206,9 @@ class PVTKScheduler:
                         title_interval = f"{mins_r // 60} GIỜ" if mins_r % 60 == 0 else f"{mins_r} PHÚT"
                         report_title = f"BÁO CÁO TRẠNG THÁI TỰ ĐỘNG (ĐỊNH KỲ {title_interval})"
                         status_msg = self.context.get_formatted_status_message(title=report_title)
-                        self.telegram_bot.send_message(status_msg)
+                        ok_rep = self.telegram_bot.send_message(status_msg)
+                        if not ok_rep:
+                            print(f"[SCHEDULER] ⚠️ Không thể gửi báo cáo định kỳ {title_interval} tới Telegram (kiểm tra kết nối/chat_id).")
 
             except Exception as e:
                 print(f"[SCHEDULER ERR] {e}")

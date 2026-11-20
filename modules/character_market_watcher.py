@@ -17,6 +17,9 @@ import subprocess
 import threading
 import select
 from typing import Dict, Any, Optional, Tuple, List, Set
+import html
+import queue
+from core.tele_notifier import send_telegram_html_safe
 
 if sys.platform == "win32":
     try:
@@ -247,17 +250,32 @@ def assign_proxies_for_accounts(raw_accounts: List[Tuple[str, str, Optional[str]
 class AppNotifier:
     """
     Bộ thông báo thuần Telegram:
-    - Gửi toàn bộ thông báo về Telegram Bot (không dùng Windows Toast hay plyer).
+    - Gửi toàn bộ thông báo về Telegram Bot an toàn, có hàng đợi tránh tràn rate-limit.
+    - Tự động fallback plain-text nếu có lỗi thực thể HTML.
     """
     _tg_config = None
-    _tg_loaded = False
+    _bot_instance = None
+    _queue = None
+    _worker_thread = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def set_bot(cls, bot_instance):
+        """Liên kết bot_instance để gửi trực tiếp và đồng bộ rate-limit."""
+        cls._bot_instance = bot_instance
 
     @classmethod
     def _load_tg_config(cls):
-        if cls._tg_loaded:
+        if cls._tg_config:
             return cls._tg_config
-        cls._tg_loaded = True
-        config_paths = ["config_247.json", "storage/telegram_notify.json", "telegram_notify.json"]
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_paths = [
+            os.path.join(base_dir, "config_247.json"),
+            os.path.join(base_dir, "storage", "telegram_notify.json"),
+            os.path.join(base_dir, "telegram_notify.json"),
+            "config_247.json",
+            "storage/telegram_notify.json"
+        ]
         for cp in config_paths:
             if os.path.exists(cp):
                 try:
@@ -273,43 +291,68 @@ class AppNotifier:
         return None
 
     @classmethod
+    def _ensure_worker(cls):
+        with cls._lock:
+            if cls._queue is None:
+                import queue
+                cls._queue = queue.Queue(maxsize=1000)
+            if cls._worker_thread is None or not cls._worker_thread.is_alive():
+                cls._worker_thread = threading.Thread(
+                    target=cls._worker_loop,
+                    daemon=True,
+                    name="AppNotifierWorker"
+                )
+                cls._worker_thread.start()
+
+    @classmethod
+    def _worker_loop(cls):
+        while True:
+            try:
+                item = cls._queue.get()
+                if item is None:
+                    break
+                title, line1, line2 = item
+                try:
+                    cls._send_telegram(title, line1, line2)
+                finally:
+                    cls._queue.task_done()
+                time.sleep(0.4)
+            except Exception:
+                time.sleep(1.0)
+
+    @classmethod
     def _send_telegram(cls, title: str, line1: str, line2: str = ""):
+        lines = [f"<b>🔔 {title}</b>", line1]
+        if line2:
+            lines.append(line2)
+        text = "\n".join(lines)
+
+        # 1. Thử gửi qua TelegramBot instance nếu có
+        if cls._bot_instance and hasattr(cls._bot_instance, "send_message"):
+            try:
+                ok = cls._bot_instance.send_message(text)
+                if ok:
+                    return
+            except Exception:
+                pass
+
+        # 2. Fallback sang send_telegram_html_safe
         cfg = cls._load_tg_config()
         if not cfg:
             return
-        try:
-            import urllib.request
-            import urllib.parse
-            token = cfg["bot_token"].strip()
-            chat_id = str(cfg["chat_id"]).strip()
-
-            lines = [f"<b>🔔 {title}</b>", line1]
-            if line2:
-                lines.append(line2)
-            text = "\n".join(lines)
-
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = urllib.parse.urlencode({
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML"
-            }).encode("utf-8")
-
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"User-Agent": "Mozilla/5.0 (PVTK-Bot/1.0)"}
-            )
-            with urllib.request.urlopen(req, timeout=5):
-                pass
-        except Exception:
-            pass
+        token = str(cfg.get("bot_token", "")).strip()
+        chat_id = str(cfg.get("chat_id", "")).strip()
+        if token and chat_id:
+            send_telegram_html_safe(token, chat_id, text, timeout=10)
 
     @classmethod
     def send_toast(cls, title: str, line1: str, line2: str = ""):
-        """Gửi thông báo qua Telegram (thay thế cho toast cũ)."""
-        t = threading.Thread(target=cls._send_telegram, args=(title, line1, line2), daemon=True)
-        t.start()
+        """Đưa thông báo vào hàng đợi gửi tuần tự (tránh tạo quá nhiều luồng song song gây 429)."""
+        cls._ensure_worker()
+        try:
+            cls._queue.put_nowait((title, line1, line2))
+        except Exception:
+            pass
 
 
 # Giữ alias WindowsNotifier để tương thích 100% với các hàm gọi cũ
@@ -739,7 +782,7 @@ class WatcherWorker:
             if self.consecutive_failures >= 5:
                 try:
                     from core.tele_notifier import TeleNotifier
-                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Đăng Nhập Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nLỗi liên tiếp: {self.consecutive_failures} lần\nChi tiết: {err}", source=f"Watcher Acc {self.idx}", cooldown=120.0)
+                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Đăng Nhập Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nLỗi liên tiếp: {self.consecutive_failures} lần\nChi tiết: {err}", source=f"Watcher Acc {self.idx}", cooldown=300.0, dedup_key=f"watcher_{self.idx}_login")
                 except Exception:
                     pass
             self._rotate_proxy()
@@ -760,7 +803,7 @@ class WatcherWorker:
             if self.consecutive_failures >= 5:
                 try:
                     from core.tele_notifier import TeleNotifier
-                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Kết Nối Server Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nLỗi liên tiếp: {self.consecutive_failures} lần\nKhông thể kết nối tới Game Server ({settings.game_host}:{settings.game_port})", source=f"Watcher Acc {self.idx}", cooldown=120.0)
+                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Kết Nối Server Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nLỗi liên tiếp: {self.consecutive_failures} lần\nKhông thể kết nối tới Game Server ({settings.game_host}:{settings.game_port})", source=f"Watcher Acc {self.idx}", cooldown=300.0, dedup_key=f"watcher_{self.idx}_conn")
                 except Exception:
                     pass
             self._rotate_proxy()
@@ -779,7 +822,7 @@ class WatcherWorker:
             if self.consecutive_failures >= 5:
                 try:
                     from core.tele_notifier import TeleNotifier
-                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Nhân Vật Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nChưa có nhân vật nào trong game!", source=f"Watcher Acc {self.idx}", cooldown=120.0)
+                    TeleNotifier.get_instance().send_error_alert(f"Lỗi Nhân Vật Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nChưa có nhân vật nào trong game!", source=f"Watcher Acc {self.idx}", cooldown=300.0, dedup_key=f"watcher_{self.idx}_char")
                 except Exception:
                     pass
             conn.close()
@@ -809,7 +852,7 @@ class WatcherWorker:
                 if self.consecutive_failures >= 5:
                     try:
                         from core.tele_notifier import TeleNotifier
-                        TeleNotifier.get_instance().send_error_alert(f"Lỗi Vào Game Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nNhân vật: {char.name}\nLỗi liên tiếp: {self.consecutive_failures} lần\nChi tiết: {err_msg}", source=f"Watcher Acc {self.idx}", cooldown=120.0)
+                        TeleNotifier.get_instance().send_error_alert(f"Lỗi Vào Game Watcher (Acc {self.idx})", f"Tài khoản: {self.user}\nNhân vật: {char.name}\nLỗi liên tiếp: {self.consecutive_failures} lần\nChi tiết: {err_msg}", source=f"Watcher Acc {self.idx}", cooldown=300.0, dedup_key=f"watcher_{self.idx}_enter")
                     except Exception:
                         pass
             conn.close()
@@ -1416,6 +1459,8 @@ class MultiAccountMarketWatcher:
         self.storage_price_file = "storage/item_price_history.json"
         self.price_tracker = ItemPriceTracker(db_path=self.storage_price_file)
         self.telegram_bot = telegram_bot
+        if telegram_bot:
+            AppNotifier.set_bot(telegram_bot)
 
         self.workers: List[WatcherWorker] = []
         self.is_running = False
@@ -1532,13 +1577,17 @@ class MultiAccountMarketWatcher:
                   f"Nhận được: \033[93m+{gold_won:,} VÀNG\033[0m (Tổng hiện có: \033[93m{new_total_gold:,} Vàng\033[0m) | "
                   f"Người phát: \033[96m{sender_display}\033[0m | Lời nhắn: '\033[95m{note_display}\033[0m'", flush=True)
 
+            s_char = html.escape(str(char_name))
+            s_user = html.escape(str(worker.user))
+            s_sender = html.escape(str(sender_display))
+            s_note = html.escape(str(note_display))
             WindowsNotifier.send_toast(
-                f"🧧 [{char_name}] ĐOẠT LÌ XÌ THÀNH CÔNG!",
-                f"• Nhân vật: <b>{char_name}</b> (Acc: <code>{worker.user}</code>)\n"
+                f"🧧 [{s_char}] ĐOẠT LÌ XÌ THÀNH CÔNG!",
+                f"• Nhân vật: <b>{s_char}</b> (Acc: <code>{s_user}</code>)\n"
                 f"• Số Vàng nhận: <b>+{gold_won:,} VÀNG</b>\n"
                 f"• Tổng Vàng hiện tại: <b>{new_total_gold:,} Vàng</b>\n"
-                f"• Người phát: <code>{sender_display}</code>\n"
-                f"• Lời chúc: <i>'{note_display}'</i>"
+                f"• Người phát: <code>{s_sender}</code>\n"
+                f"• Lời chúc: <i>'{s_note}'</i>"
             )
 
     def notify_npc_error_telegram(self, worker: WatcherWorker, target_npc: str, error_detail: str):
@@ -1552,15 +1601,20 @@ class MultiAccountMarketWatcher:
         char_lv = getattr(worker.char_info, "level", 0) if worker.char_info else 0
         curr_time = datetime.now(VN_TZ).strftime("%H:%M:%S %d/%m/%Y")
 
+        s_user = html.escape(str(worker.user))
+        s_char = html.escape(str(char_name))
+        s_npc = html.escape(str(target_npc))
+        s_err = html.escape(str(error_detail))
+
         msg = (
             f"⚠️ <b>[CẢNH BÁO THEO DÕI SỞ GIAO DỊCH]</b>\n"
             f"⏱ <i>Thời gian: {curr_time}</i>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 <b>Tài khoản:</b> <code>{worker.user}</code> (Acc {worker.idx})\n"
-            f"🎮 <b>Nhân vật:</b> <b>{char_name}</b> (Cấp {char_lv})\n"
-            f"🎯 <b>Mục tiêu:</b> NPC <b>{target_npc}</b>\n"
+            f"👤 <b>Tài khoản:</b> <code>{s_user}</code> (Acc {worker.idx})\n"
+            f"🎮 <b>Nhân vật:</b> <b>{s_char}</b> (Cấp {char_lv})\n"
+            f"🎯 <b>Mục tiêu:</b> NPC <b>{s_npc}</b>\n"
             f"📍 <b>Bản đồ:</b> Tân Nguyệt Trấn (Quảng Trường Tân Nguyệt)\n"
-            f"❌ <b>Trạng thái lỗi:</b> <i>{error_detail}</i>\n\n"
+            f"❌ <b>Trạng thái lỗi:</b> <i>{s_err}</i>\n\n"
             f"💡 <i>Tool đã tự động dịch chuyển nhân vật đến map Tân Nguyệt Trấn nhưng vẫn không tìm thấy NPC hoặc không mở được Sở Giao Dịch!</i>"
         )
 
@@ -1675,7 +1729,7 @@ class MultiAccountMarketWatcher:
             if m_min_gold is not None:
                 market_context.append(f"• Rẻ nhất từng thấy: <b>{m_min_gold:,.1f} Vàng</b>")
 
-            reasons = grp.get("reasons", [])
+            reasons = [html.escape(str(r)) for r in grp.get("reasons", [])]
             reason_str = f"\n💡 <b>Đánh giá:</b> {', '.join(reasons)}" if reasons else ""
 
             if grp.get("is_snipe"):
@@ -1687,7 +1741,8 @@ class MultiAccountMarketWatcher:
             else:
                 title = f"SỞ GIAO DỊCH: {cat_tag} VẬT PHẨM MỚI!"
 
-            line1 = f"{icon} <b>{it['name']}</b> x{it['quantity']}{lot_toast} • <i>{cat_tag}</i>"
+            s_itname = html.escape(str(it['name']))
+            line1 = f"{icon} <b>{s_itname}</b> x{it['quantity']}{lot_toast} • <i>{cat_tag}</i>"
             lines2 = [f"💰 <b>Giá bán:</b> <b>{price_str}</b>{unit_info}"]
             if market_context:
                 lines2.append(f"📊 " + " | ".join(market_context))
@@ -1729,7 +1784,8 @@ class MultiAccountMarketWatcher:
                 if u_gold > 0:
                     unit_info = f" <i>({u_gold} V/món)</i>"
 
-            item_lines.append(f"{badge}{cat_str}{icon} <b>{it['name']}</b> x{it['quantity']}{lot_str} — <b>{price_str}</b>{unit_info}")
+            m_itname = html.escape(str(it['name']))
+            item_lines.append(f"{badge}{cat_str}{icon} <b>{m_itname}</b> x{it['quantity']}{lot_str} — <b>{price_str}</b>{unit_info}")
 
         CHUNK_SIZE = 10
         chunks = [item_lines[i:i + CHUNK_SIZE] for i in range(0, len(item_lines), CHUNK_SIZE)]
@@ -1827,10 +1883,12 @@ class MultiAccountMarketWatcher:
                         if new_ids:
                             for aid in new_ids:
                                 c = current_chars[aid]
+                                s_cname = html.escape(str(c['name']))
+                                s_cjob = html.escape(str(c['job_name']))
                                 WindowsNotifier.send_toast(
                                     f"SỞ GIAO DỊCH: NHÂN VẬT MỚI! - {c['price']:,} VÀNG",
-                                    f"Tên: {c['name']} (Lv {c['level']} {c['job_name']})",
-                                    f"Giá bán: {c['price']:,} Vàng"
+                                    f"Tên: <b>{s_cname}</b> (Lv {c['level']} {s_cjob})",
+                                    f"Giá bán: <b>{c['price']:,} Vàng</b>"
                                 )
                                 print(f"[{curr_time}] \033[92m[NHÂN VẬT MỚI (LẦN TRƯỚC)]\033[0m \033[93m{c['name']}\033[0m | Cấp: \033[96m{c['level']}\033[0m | Phái: \033[95m{c['job_name']}\033[0m | Giá: \033[93m{c['price']:,} Vàng\033[0m", flush=True)
                                 self.known_characters[aid] = c
@@ -1852,10 +1910,12 @@ class MultiAccountMarketWatcher:
                         if new_ids:
                             for aid in new_ids:
                                 c = current_chars[aid]
+                                s_cname = html.escape(str(c['name']))
+                                s_cjob = html.escape(str(c['job_name']))
                                 WindowsNotifier.send_toast(
                                     f"SỞ GIAO DỊCH: NHÂN VẬT MỚI! - {c['price']:,} VÀNG",
-                                    f"Tên: {c['name']} (Lv {c['level']} {c['job_name']})",
-                                    f"Giá bán: {c['price']:,} Vàng"
+                                    f"Tên: <b>{s_cname}</b> (Lv {c['level']} {s_cjob})",
+                                    f"Giá bán: <b>{c['price']:,} Vàng</b>"
                                 )
                                 print(f"[{curr_time}] \033[92m[NHÂN VẬT MỚI XUẤT HIỆN!]\033[0m \033[93m{c['name']}\033[0m | Cấp: \033[96m{c['level']}\033[0m | Phái: \033[95m{c['job_name']}\033[0m | Giá: \033[93m{c['price']:,} Vàng\033[0m", flush=True)
                                 self.known_characters[aid] = c

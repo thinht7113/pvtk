@@ -30,6 +30,7 @@ import threading
 import html
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List, Callable, Tuple
+from core.tele_notifier import telegram_api_post, send_telegram_html_safe, strip_html_tags
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -116,33 +117,10 @@ class TelegramBot:
             return None
         if not self.bot_token:
             return None
-        url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
-        try:
-            data = None
-            if params:
-                data = json.dumps(params).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={"Content-Type": "application/json", "User-Agent": "PVTK-247-Bot/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw)
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                time.sleep(2.0)
-            return None
-        except (socket.timeout, urllib.error.URLError) as e:
-            err_str = str(e).lower()
-            is_handshake_or_conn = ("handshake" in err_str or "connect" in err_str or "refused" in err_str)
-            if method == "getUpdates" and "timed out" in err_str and not is_handshake_or_conn:
-                return {"ok": True, "result": []}
-            if is_handshake_or_conn:
-                print(f"[TG BOT] L\xe1\xbb\x97i k\xe1\xba\xbft n\xe1\xbb\x91i m\xe1\xba\xa1ng Telegram ({method}): {e}")
-            return None
-        except Exception:
-            return None
+        ok, res, err_desc = telegram_api_post(self.bot_token, method, params, timeout=timeout)
+        if method == "getUpdates" and not ok and "timed out" in err_desc.lower():
+            return {"ok": True, "result": []}
+        return res
 
     def send_message(self, text: str, chat_id: Optional[str] = None, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
         if not self.enabled or not is_allowed_telegram_folder(self.base_dir):
@@ -150,17 +128,7 @@ class TelegramBot:
         target_chat = str(chat_id or self.chat_id).strip()
         if not target_chat or not self.bot_token:
             return False
-        
-        params: Dict[str, Any] = {
-            "chat_id": target_chat,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        if reply_markup:
-            params["reply_markup"] = reply_markup
-            
-        res = self._api_call("sendMessage", params, timeout=10)
-        return res is not None and res.get("ok", False)
+        return send_telegram_html_safe(self.bot_token, target_chat, text, reply_markup=reply_markup, timeout=12)
 
     def answer_callback_query(self, callback_query_id: str, text: Optional[str] = None):
         params = {"callback_query_id": callback_query_id}
@@ -277,7 +245,9 @@ class TelegramBot:
         self.poll_thread.start()
         print(f"[TG BOT] Đã khởi động Telegram Bot polling (Chat ID: {self.chat_id or 'Chưa gán'}).")
         if self.chat_id:
-            self.send_message("🤖 <b>PVTK 24/7 Bot đã khởi động thành công!</b>\nGõ /help để xem danh sách lệnh hoặc /menu để mở bảng điều khiển.")
+            ok_start = self.send_message("🤖 <b>PVTK 24/7 Bot đã khởi động thành công!</b>\nGõ /help để xem danh sách lệnh hoặc /menu để mở bảng điều khiển.")
+            status_str = "THÀNH CÔNG" if ok_start else "THẤT BẠI (Vui lòng kiểm tra lại Bot Token / Chat ID / Quyền chat)"
+            print(f"[TG BOT] Thông báo khởi động tới Chat ID {self.chat_id}: {status_str}.")
 
     def stop(self):
         self.running = False
@@ -354,6 +324,8 @@ class TelegramBot:
                 self.send_message("⛔ <b>Bạn không có quyền điều khiển Bot này!</b>", chat_id)
                 return
 
+            if self.chat_id and str(chat_id).strip() != str(self.chat_id).strip():
+                print(f"[TG BOT] Nhận lệnh '{text[:30]}' từ Chat ID nhóm/kênh ({chat_id}) khác cấu hình mặc định ({self.chat_id}). Phản hồi trực tiếp về Chat {chat_id}.")
             self._handle_command(chat_id, text)
 
     def register_running_task(self, task_type: str, name: str, stop_event: threading.Event, details: Optional[Dict[str, Any]] = None) -> str:
@@ -2206,7 +2178,8 @@ class TelegramBot:
                     if "[THEO DÕI]" not in l and "DEBUG 0x2B65" not in l
                 ]
                 recent = "".join(meaningful[-25:]) if meaningful else "".join(lines[-25:])
-                self.send_message(f"📜 <b>25 DÒNG LOG HOẠT ĐỘNG GẦN NHẤT:</b>\n<pre>{recent[-3800:]}</pre>", chat_id)
+                safe_recent = html.escape(recent[-3500:])
+                self.send_message(f"📜 <b>25 DÒNG LOG HOẠT ĐỘNG GẦN NHẤT:</b>\n<pre>{safe_recent}</pre>", chat_id)
             except Exception as e:
                 self.send_message(f"Lỗi đọc log: {e}", chat_id)
         else:

@@ -10,6 +10,7 @@ import time
 import json
 import signal
 import socket
+import html
 
 # Force IPv4 preference for getaddrinfo to bypass broken IPv6 routes to Telegram and external services
 _orig_getaddrinfo = socket.getaddrinfo
@@ -203,6 +204,9 @@ class TelegramLogHandler(logging.Handler):
 
     def emit(self, record):
         try:
+            if getattr(record, "_tele_notified", False):
+                return
+            record._tele_notified = True
             if not getattr(self.master, "is_running", True):
                 return
             raw_msg = record.getMessage()
@@ -879,7 +883,7 @@ class PVTKMaster247:
                 elif self.telegram_bot:
                     self.telegram_bot.send_message(msg)
             except Exception as e:
-                err_msg = f"❌ <b>Lỗi dịch chuyển:</b> {e}"
+                err_msg = f"❌ <b>Lỗi dịch chuyển:</b> {html.escape(str(e))}"
                 logger.error(err_msg)
                 if callback:
                     callback(err_msg)
@@ -943,15 +947,18 @@ class PVTKMaster247:
             accounts = self.online_reward_accounts or self.accounts
             ok, enter_res, city_info = CityManager.run_enter_city_single(target_str, accounts)
             if ok:
+                s_target_str = html.escape(str(target_str))
+                s_enter_res = html.escape(str(enter_res))
                 msg = (
                     f"🏰 <b>VÀO THÀNH THÀNH CÔNG</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 <b>Mục tiêu:</b> ID <code>{target_str}</code> ({target_id})\n"
-                    f"✅ {enter_res}\n"
+                    f"🎯 <b>Mục tiêu:</b> ID <code>{s_target_str}</code> ({target_id})\n"
+                    f"✅ {s_enter_res}\n"
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 )
             else:
-                msg = f"❌ <b>[VÀO THÀNH THẤT BẠI]</b>\n{enter_res}"
+                s_enter_res = html.escape(str(enter_res))
+                msg = f"❌ <b>[VÀO THÀNH THẤT BẠI]</b>\n{s_enter_res}"
             if callback:
                 callback(msg)
             elif self.telegram_bot:
@@ -1010,7 +1017,7 @@ class PVTKMaster247:
                     else:
                         sorted_items = sorted(items_summary.items(), key=lambda x: x[1], reverse=True)
                         for item_name, count in sorted_items:
-                            lines.append(f"  • <b>{item_name}</b>: <code>{count:,}</code> món")
+                            lines.append(f"  • <b>{html.escape(str(item_name))}</b>: <code>{count:,}</code> món")
                     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
 
                 if details_per_acc:
@@ -1044,7 +1051,7 @@ class PVTKMaster247:
                     for part in chunks:
                         if callback: callback(part)
             except Exception as e:
-                err_msg = f"❌ <b>Lỗi khi bán vật phẩm:</b> {e}"
+                err_msg = f"❌ <b>Lỗi khi bán vật phẩm:</b> {html.escape(str(e))}"
                 logger.error(err_msg)
                 if callback: callback(err_msg)
             finally:
@@ -1089,7 +1096,7 @@ class PVTKMaster247:
                     st_icon = "✅" if d.get("success") else "❌"
                     amt = d.get("amount", 0)
                     detail_msg = d.get("message", "")
-                    lines.append(f"{st_icon} <b>{user}:</b> {amt:,} KNB ({detail_msg})")
+                    lines.append(f"{st_icon} <b>{html.escape(str(user))}:</b> {amt:,} KNB ({html.escape(str(detail_msg))})")
                 lines.append("━━━━━━━━━━━━━━━━━━━━━━")
                 lines.append(f"🏆 <b>Tổng KNB đã chuyển:</b> {total:,} KNB")
 
@@ -1100,7 +1107,7 @@ class PVTKMaster247:
                 elif self.telegram_bot:
                     self.telegram_bot.send_message(report)
             except Exception as e:
-                err_msg = f"❌ <b>Lỗi chuyển KNB:</b> {e}"
+                err_msg = f"❌ <b>Lỗi chuyển KNB:</b> {html.escape(str(e))}"
                 logger.error(err_msg)
                 if callback:
                     callback(err_msg, None)
