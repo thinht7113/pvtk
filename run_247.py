@@ -248,6 +248,7 @@ class PVTKMaster247:
         self.start_time = time.time()
         self.is_running = False
         self.is_paused = False
+        self.is_restarting = False
 
         # Configuration
         self.config: Dict[str, Any] = self._load_config()
@@ -1285,21 +1286,24 @@ class PVTKMaster247:
 
     def restart_system(self):
         """Dừng sạch sẽ các kết nối và khởi động lại toàn bộ tiến trình/service."""
+        self.is_restarting = True
         logger.info("🔄 Đang khởi động lại toàn bộ hệ thống PVTK 24/7 theo lệnh Telegram...")
-        self.stop()
         try:
-            logging.shutdown()
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
-        time.sleep(0.3)
-        if os.environ.get("INVOCATION_ID"):
-            # Chạy dưới systemd (Restart=on-failure): thoát mã lỗi 1 để systemd tự động khởi động lại sạch sẽ
-            os._exit(1)
-        else:
-            # Chạy trực tiếp trên Windows/Terminal: thay thế tiến trình hiện tại
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            self.stop()
+            try:
+                logging.shutdown()
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            time.sleep(0.3)
+        finally:
+            if os.environ.get("INVOCATION_ID"):
+                # Chạy dưới systemd (Restart=on-failure): thoát mã lỗi 1 để systemd tự động khởi động lại sạch sẽ
+                os._exit(1)
+            else:
+                # Chạy trực tiếp trên Windows/Terminal: thay thế tiến trình hiện tại
+                os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def main():
@@ -1318,8 +1322,8 @@ def main():
 
     # Main thread keep-alive loop
     try:
-        while master.is_running:
-            time.sleep(1)
+        while master.is_running or master.is_restarting:
+            time.sleep(0.5)
     except (KeyboardInterrupt, SystemExit):
         master.stop()
 
