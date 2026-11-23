@@ -19,22 +19,22 @@ active_conn_lock = threading.Lock()
 
 def graceful_shutdown_all():
     """
-    Called by the main thread signal handler on Ctrl+C.
-    Sends 0x0003 (Leave Character) to all active connections before closing them.
-    This prevents ghost accounts on the server.
+    Called by shutdown / signal handler on Ctrl+C or SIGTERM.
+    Attempts non-blocking 0x0003 (Leave Character) on connected sockets,
+    then forcefully closes all tracked connections (including mid-connect sockets)
+    without blocking so blocked worker threads return immediately.
     """
     with active_conn_lock:
         conns = list(active_connections)
         active_connections.clear()
+    logout_packet = struct.pack(">Hh", 4, 3)
     for conn in conns:
         try:
-            if conn.is_connected and conn.sock:
-                # Construct CG_LOGOUT message (0x0003)
-                # total_len=4, msg_type=3 (0x0003), payload_len=0
-                logout_packet = struct.pack(">Hh", 4, 3)
+            sock = getattr(conn, "sock", None)
+            if conn.is_connected and sock is not None:
                 try:
-                    conn.sock.settimeout(0.5)
-                    conn.sock.sendall(logout_packet)
+                    sock.setblocking(False)
+                    sock.send(logout_packet)
                 except Exception:
                     pass
             conn.close()
@@ -174,6 +174,8 @@ def _connect_http_tunnel(sock: socket.socket, target_host: str, target_port: int
 
 
 class PVTKConnection:
+    MAX_RX_BUF_BYTES = 1024 * 1024  # 1 MB cap per connection
+
     def __init__(self, host: str, port: int, timeout: float = 15.0, proxy: Optional[str] = None):
         self.host = host
         self.port = port
@@ -181,17 +183,26 @@ class PVTKConnection:
         self.proxy = proxy
         self.sock: Optional[socket.socket] = None
         self.is_connected = False
+        self._closed = False
         self._rx_buf: bytearray = bytearray()
         self.lock = threading.RLock()
+
+    def has_buffered_data(self) -> bool:
+        return bool(self.is_connected and len(self._rx_buf) >= 4)
 
     def connect(self) -> bool:
         self.close()
         try:
+            self._closed = False
             self._rx_buf = bytearray()
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock.settimeout(self.timeout)
+
+            # Register before blocking connect() so shutdown can abort stalled handshakes
+            with active_conn_lock:
+                active_connections.add(self)
 
             if self.proxy:
                 # Tunnel through proxy
@@ -211,14 +222,18 @@ class PVTKConnection:
                 else:
                     # Default SOCKS5
                     success = _connect_socks5(self.sock, self.host, self.port, user, password)
-                    if not success and not self.proxy.startswith("socks5://"):
+                    if not success and not self._closed and not self.proxy.startswith("socks5://"):
                         # If default SOCKS5 failed and user didn't explicitly prefix socks5://, try HTTP CONNECT
                         try:
-                            try:
-                                self.sock.close()
-                            except Exception:
-                                pass
+                            old_sock = self.sock
                             self.sock = None
+                            if old_sock is not None:
+                                try:
+                                    old_sock.close()
+                                except Exception:
+                                    pass
+                            if self._closed:
+                                return False
                             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                             self.sock.settimeout(self.timeout)
                             self.sock.connect((proxy_host, proxy_port))
@@ -226,19 +241,21 @@ class PVTKConnection:
                         except Exception:
                             success = False
 
-                if not success:
+                if not success or self._closed:
                     self.is_connected = False
                     self.close()
                     return False
             else:
                 # Direct connection
                 self.sock.connect((self.host, self.port))
+                if self._closed:
+                    self.is_connected = False
+                    self.close()
+                    return False
 
             self.is_connected = True
-            with active_conn_lock:
-                active_connections.add(self)
             return True
-        except Exception as e:
+        except Exception:
             self.is_connected = False
             self.close()
             return False
@@ -281,6 +298,8 @@ class PVTKConnection:
                             msg_type = struct.unpack(">h", self._rx_buf[2:4])[0]
                             payload = bytes(self._rx_buf[4:total_len])
                             del self._rx_buf[:total_len]
+                            if not self._rx_buf:
+                                self._rx_buf = bytearray()
                             return Message(msg_type, payload)
 
                     # 2. Need more data to form complete packet
@@ -302,6 +321,10 @@ class PVTKConnection:
                         self.close()
                         return None
                     self._rx_buf.extend(chunk)
+                    if len(self._rx_buf) > self.MAX_RX_BUF_BYTES:
+                        self._rx_buf = bytearray()
+                        self.close()
+                        return None
             except socket.timeout:
                 return None
             except Exception:
@@ -356,21 +379,30 @@ class PVTKConnection:
             return bytes(data)
 
     def close(self):
-        with self.lock:
-            self.is_connected = False
-            if self.sock:
-                try:
-                    self.sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    self.sock.close()
-                except Exception:
-                    pass
+        self.is_connected = False
+        self._closed = True
+        sock = self.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        acquired = self.lock.acquire(timeout=0.3)
+        try:
+            if acquired:
                 self.sock = None
-            
-            with active_conn_lock:
-                active_connections.discard(self)
+                self._rx_buf = bytearray()
+        finally:
+            if acquired:
+                self.lock.release()
+
+        with active_conn_lock:
+            active_connections.discard(self)
 
     def __del__(self):
         sock = getattr(self, "sock", None)

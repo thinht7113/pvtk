@@ -27,6 +27,12 @@ socket.getaddrinfo = _ipv4_preferred_getaddrinfo
 
 import logging
 import threading
+
+if sys.platform.startswith("linux"):
+    try:
+        threading.stack_size(512 * 1024)
+    except Exception:
+        pass
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
@@ -80,6 +86,49 @@ from logging.handlers import RotatingFileHandler
 
 LOG_FILE = os.path.join(BASE_DIR, "bot_247.log")
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[mK]")
+_LIBC = None
+_LIBC_LOAD_FAILED = False
+
+
+def _trim_process_memory():
+    """Collect Python cyclic garbage and ask glibc to release freed arenas back to OS on Linux."""
+    global _LIBC, _LIBC_LOAD_FAILED
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if not sys.platform.startswith("linux") or _LIBC_LOAD_FAILED:
+        return
+    try:
+        if _LIBC is None:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            libc.malloc_trim.restype = ctypes.c_int
+            _LIBC = libc
+        _LIBC.malloc_trim(0)
+    except Exception:
+        _LIBC_LOAD_FAILED = True
+
+
+def _get_process_memory_stats() -> Optional[Dict[str, Any]]:
+    """Read current RSS, Swap, Thread count, and FD count from /proc/self on Linux."""
+    if not sys.platform.startswith("linux"):
+        return None
+    stats: Dict[str, Any] = {"rss_mb": 0.0, "swap_mb": 0.0, "threads": 0, "fds": 0}
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    stats["rss_mb"] = int(line.split()[1]) / 1024.0
+                elif line.startswith("VmSwap:"):
+                    stats["swap_mb"] = int(line.split()[1]) / 1024.0
+                elif line.startswith("Threads:"):
+                    stats["threads"] = int(line.split()[1])
+        stats["fds"] = len(os.listdir("/proc/self/fd"))
+        return stats
+    except Exception:
+        return None
 
 
 class _RotatingFileFormatter(logging.Formatter):
@@ -281,6 +330,8 @@ class PVTKMaster247:
         self.is_event_running = False
         self.event_lock = threading.Lock()
         self._server_unreachable = False
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
     def _load_config(self) -> Dict[str, Any]:
         default_cfg = {
@@ -417,6 +468,7 @@ class PVTKMaster247:
         logger.info(f"🌐 [PROXY] {len(self.online_reward_accounts)} Acc Treo Online Nhận Quà: Vận hành qua Proxy.")
 
     def start(self):
+        self._stopped = False
         self.is_running = True
         logger.info("=" * 80)
         logger.info("       HỆ THỐNG PVTK 24/7 BOT AUTOMATION CHÍNH THỨC KHỞI ĐỘNG")
@@ -528,7 +580,7 @@ class PVTKMaster247:
         self.online_reward_thread = threading.Thread(target=_run_online_rewards_loop, daemon=True, name="OnlineRewardMainThread")
         self.online_reward_thread.start()
 
-    def stop_online_rewards_temporarily(self, timeout: float = 8.0):
+    def stop_online_rewards_temporarily(self, timeout: float = 4.0):
         """Tạm dừng luồng treo online và đóng toàn bộ socket để nhường kết nối hoặc relogin."""
         self.online_reward_stop_event.set()
         if self.online_reward_runner:
@@ -759,6 +811,17 @@ class PVTKMaster247:
             FreeProxyManager.periodic_refresh()
         except Exception:
             pass
+
+        # === 7. Thu gom bộ nhớ định kỳ & ghi nhận telemetry ===
+        _trim_process_memory()
+        mem = _get_process_memory_stats()
+        if mem is not None:
+            with FreeProxyManager._lock:
+                proxy_cnt = len(FreeProxyManager._proxies)
+            logger.info(
+                f"[HEALTH CHECK] RAM: RSS={mem['rss_mb']:.1f}MB | Swap={mem['swap_mb']:.1f}MB | "
+                f"Threads={mem['threads']} | FDs={mem['fds']} | ProxyPool={proxy_cnt}"
+            )
 
 
     def teleport_all(self, map_option: str, callback: Optional[Callable[[str], None]] = None):
@@ -1272,23 +1335,32 @@ class PVTKMaster247:
             FreeProxyManager.stop_background_worker()
         except Exception:
             pass
-        gc.collect()
+        _trim_process_memory()
         logger.info("Đã chuyển sang chế độ chờ thành công.")
 
     def stop(self):
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
         logger.info("🛑 Đang đóng toàn bộ hệ thống PVTK 24/7...")
         self.is_running = False
-        self.stop_online_rewards_temporarily()
-        if self.special_watcher:
-            self.special_watcher.stop()
-        if self.scheduler:
-            self.scheduler.stop()
         try:
             FreeProxyManager.stop_background_worker()
         except Exception:
             pass
+        if self.scheduler:
+            self.scheduler.stop()
         if self.telegram_bot:
             self.telegram_bot.stop()
+        if self.special_watcher:
+            self.special_watcher.stop(timeout=2.0)
+        self.stop_online_rewards_temporarily(timeout=3.0)
+        try:
+            from core.network import graceful_shutdown_all
+            graceful_shutdown_all()
+        except Exception:
+            pass
         logger.info("Đã dừng thành công.")
 
     def restart_system(self):
@@ -1298,9 +1370,9 @@ class PVTKMaster247:
         try:
             self.stop()
             try:
-                logging.shutdown()
                 sys.stdout.flush()
                 sys.stderr.flush()
+                logging.shutdown()
             except Exception:
                 pass
             time.sleep(0.3)
@@ -1315,11 +1387,11 @@ class PVTKMaster247:
 
 def main():
     master = PVTKMaster247()
+    shutdown_flag = [False]
 
     def handle_sig(sig, frame):
-        logger.info("\n[SHUTDOWN] Nhận tín hiệu dừng (Ctrl+C hoặc SIGTERM)...")
-        master.stop()
-        sys.exit(0)
+        shutdown_flag[0] = True
+        master.is_running = False
 
     signal.signal(signal.SIGINT, handle_sig)
     if hasattr(signal, "SIGTERM"):
@@ -1329,10 +1401,22 @@ def main():
 
     # Main thread keep-alive loop
     try:
-        while master.is_running or master.is_restarting:
-            time.sleep(0.5)
-    except (KeyboardInterrupt, SystemExit):
-        master.stop()
+        while (master.is_running or master.is_restarting) and not shutdown_flag[0]:
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        shutdown_flag[0] = True
+    finally:
+        if not master.is_restarting:
+            logger.info("[SHUTDOWN] Nhận tín hiệu dừng (SIGINT/SIGTERM), đang đóng kết nối an toàn...")
+            master.stop()
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                logging.shutdown()
+            except Exception:
+                pass
+            # Bypass concurrent.futures.thread._python_exit which can hang 90s waiting on dead proxy connect sockets
+            os._exit(0)
 
 
 if __name__ == "__main__":

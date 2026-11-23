@@ -3,7 +3,7 @@ import sys
 import time
 import socket
 from typing import Tuple, Dict, Any, List, Optional, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait, FIRST_COMPLETED
 from core.config import settings
 from modules.auth import AuthManager
 from core.device_faker import DeviceFaker
@@ -50,6 +50,21 @@ class BaseAccountRunner:
     def is_user_cancelled(self) -> bool:
         return bool(self.user_stop_event and self.user_stop_event.is_set())
 
+    def _wait_interruptible(self, timeout: float) -> bool:
+        if self.is_stopped():
+            return True
+        if not self.user_stop_event or self.user_stop_event is self.stop_event:
+            return self.stop_event.wait(timeout=timeout)
+        deadline = time.time() + timeout
+        while True:
+            if self.is_stopped():
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            if self.stop_event.wait(timeout=min(0.25, remaining)):
+                return True
+
     def log(self, message: str):
         safe_print(message)
 
@@ -86,47 +101,63 @@ class BaseAccountRunner:
             futures[executor.submit(self._account_retry_wrapper, task, total)] = task
             proxy = task[2] if len(task) > 2 else None
             stagger = 0.35 if not proxy else 0.1
-            time.sleep(stagger)
+            if self._wait_interruptible(stagger):
+                break
 
         interrupted = False
+        pending = set(futures.keys())
         try:
-            for future in as_completed(futures):
-                try:
-                    res = future.result()
-                    if res:
-                        _add_result(res)
-                except Exception as e:
-                    import traceback
-                    self.log(f"Lỗi không xác định ở vòng lặp ngoài: {e}")
-                    traceback.print_exc()
-
+            while pending:
                 if self.is_stopped():
-                    if self.is_user_cancelled():
-                        self.log("\n\033[93m[ĐÃ HỦY TIẾN TRÌNH]\033[0m Nhận lệnh dừng khẩn cấp (/huy). Đang đợi các tác vụ dở dang hoàn tất...")
-                    else:
-                        self.log("\n\033[92m[HOÀN TẤT MỤC TIÊU]\033[0m Đã đạt giới hạn yêu cầu. Đang đợi các tác vụ dở dang hoàn tất...")
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    # Thu thập nốt kết quả của các tác vụ đã hoàn thành
-                    for f in futures:
-                        if f.done() and not f.cancelled():
-                            try:
-                                r = f.result()
-                                if r:
-                                    _add_result(r)
-                            except Exception:
-                                pass
                     break
+                done, pending = futures_wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for future in done:
+                    try:
+                        res = future.result()
+                        if res:
+                            _add_result(res)
+                    except Exception as e:
+                        import traceback
+                        self.log(f"Lỗi không xác định ở vòng lặp ngoài: {e}")
+                        traceback.print_exc()
+
+            if self.is_stopped():
+                interrupted = True
+                if self.is_user_cancelled():
+                    self.log("\n\033[93m[ĐÃ HỦY TIẾN TRÌNH]\033[0m Nhận lệnh dừng khẩn cấp (/huy). Đang đóng các tác vụ dở dang...")
+                else:
+                    self.log("\n\033[92m[HOÀN TẤT MỤC TIÊU]\033[0m Đã đạt giới hạn yêu cầu. Đang đóng các tác vụ dở dang...")
+                for f in pending:
+                    f.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                wait_deadline = time.time() + 2.5
+                while self.get_active_workers_count() > 0 and time.time() < wait_deadline:
+                    time.sleep(0.1)
+                for f in futures:
+                    if f.done() and not f.cancelled():
+                        try:
+                            r = f.result()
+                            if r:
+                                _add_result(r)
+                        except Exception:
+                            pass
         except KeyboardInterrupt:
             interrupted = True
             self.log("\n\033[93m[ĐÃ HỦY]\033[0m Nhận lệnh dừng (Ctrl+C). Đang đóng kết nối an toàn để tránh kẹt acc...")
             self.stop_event.set()
-            # Try to wait for threads to finish their finally blocks without blocking forever
+            for f in pending:
+                f.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
             return all_results
         finally:
-            if not interrupted:
+            if not interrupted and not self.is_stopped():
                 try:
                     executor.shutdown(wait=True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
 
@@ -203,7 +234,8 @@ class BaseAccountRunner:
                             self.log(f"\n\033[91m[LỖI ĐỔI PROXY]\033[0m {e}")
                     
                     self.log(f"\n\033[93m[CHẠY LẠI {self.thread_name.upper()}]\033[0m {task[2]} gặp lỗi hoặc chưa xong. Thử lại lần {retries}/{self.max_retries}...")
-                    time.sleep(0.1)
+                    if self._wait_interruptible(0.1):
+                        break
 
             if last_res and accumulated_chars:
                 last_res["characters_results"] = list(accumulated_chars.values())
@@ -265,13 +297,18 @@ class BaseAccountRunner:
         err_reason = ""
         
         for proxy_attempt in range(3):
+            if self.is_stopped():
+                break
             try:
                 login_data, err_reason = AuthManager.master_login(m_host, m_port, username, password, proxy=current_proxy)
                 if login_data:
                     break
             except Exception as e:
                 err_reason = str(e)
-                
+
+            if self.is_stopped():
+                break
+
             if login_data is None:
                 if "Sai tài khoản/mật khẩu" in err_reason or "bị khóa" in err_reason or "không tồn tại" in err_reason:
                     account_result["error"] = err_reason
@@ -295,15 +332,24 @@ class BaseAccountRunner:
                     if self.proxy_rotation:
                         FreeProxyManager.release_proxy(current_proxy)
                         FreeProxyManager.mark_proxy_dead(current_proxy)
+                        if self.is_stopped():
+                            break
                         new_proxy = FreeProxyManager.acquire_proxy(exclude_proxy=current_proxy)
                         if new_proxy and new_proxy != current_proxy:
                             current_proxy = new_proxy
                             proxy_tag = f" [Proxy: {current_proxy}]"
                             thread_tag = f"[{self.thread_name} {idx}/{total} | {s_name} | {username}{proxy_tag}]"
                             self.log(f"{thread_tag} \033[93m[ĐỔI PROXY]\033[0m Lỗi mạng, thử lại với proxy mới: {current_proxy}")
-                            time.sleep(0.1)
+                            if self._wait_interruptible(0.1):
+                                break
                             continue
                     break
+
+        if self.is_stopped():
+            account_result["error"] = "Dừng bởi người dùng"
+            if self.proxy_rotation:
+                FreeProxyManager.release_proxy(current_proxy)
+            return account_result
 
         if not login_data:
             account_result["error"] = err_reason

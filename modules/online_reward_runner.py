@@ -986,12 +986,14 @@ class OnlineRewardRunner(CharacterLoopRunner):
                     reconnect_attempts += 1
                     continue
 
-            # Listen for server push packets (non-blocking)
+            # Listen for server push packets & drain any buffered frames (non-blocking)
+            disconnected = False
             try:
-                res = active_conn.receive_message(timeout=0.8)
-                if res:
+                res = active_conn.receive_message(timeout=0.4)
+                packets_read = 0
+                while res is not None and packets_read < 50 and not self.stop_event.is_set():
+                    packets_read += 1
                     if res.type == OPCODE_ONLINE_REWARD_INFO:
-                        self.log(f"DEBUG 0x2B64 HEX: {res.data.hex().upper()}")
                         is_show = res.getBoolean() if res.hasRemaining() else True
                         if not is_show:
                             # Server says all rewards claimed for today!
@@ -1006,9 +1008,21 @@ class OnlineRewardRunner(CharacterLoopRunner):
                         self.log(f"{char_tag} \033[91m[BỊ NGẮT KẾT NỐI BỞI SERVER]\033[0m")
                         self.mark_account_disconnected(username)
                         active_conn.close()
-                        continue
+                        disconnected = True
+                        break
+
+                    if active_conn and active_conn.is_connected and active_conn.has_buffered_data():
+                        res = active_conn.receive_message(timeout=0.05)
+                    else:
+                        break
             except Exception:
                 pass
+
+            if disconnected:
+                continue
+
+            if self.stop_event.is_set():
+                break
 
             now = time.time()
 
@@ -1060,7 +1074,8 @@ class OnlineRewardRunner(CharacterLoopRunner):
                 except Exception:
                     pass
 
-            time.sleep(0.2)
+            if self.stop_event.wait(timeout=0.2):
+                break
 
         return False, active_conn, char
 
@@ -1217,7 +1232,8 @@ class OnlineRewardRunner(CharacterLoopRunner):
                             break
                         self.log(f"{char_tag} \033[91m[VÀO GAME THẤT BẠI]\033[0m Lỗi kết nối nhân vật '{char.name}', thử lại sau 3s...")
                         self.char_status_summary_global[username][char.name] = "Lỗi vào game (Thử lại)"
-                        time.sleep(3.0)
+                        if self.stop_event.wait(timeout=3.0):
+                            break
                         continue
 
                     self.log(f"{char_tag} \033[92m[VÀO GAME THÀNH CÔNG]\033[0m Vị trí: \033[96m{char.map_name}\033[0m. Đang theo dõi nhận quà...")
@@ -1242,7 +1258,8 @@ class OnlineRewardRunner(CharacterLoopRunner):
                             AuthManager.leave_character(active_conn)
                         except Exception:
                             pass
-                        time.sleep(1.0)
+                        if self.stop_event.wait(timeout=1.0):
+                            break
                         continue
                     elif res_status is True:
                         claimed_count = self.char_rewards_claimed_global[username].get(last_active_char.id, 0)
@@ -1253,12 +1270,12 @@ class OnlineRewardRunner(CharacterLoopRunner):
                             AuthManager.leave_character(active_conn)
                         except Exception:
                             pass
-                        time.sleep(1.0)
+                        if self.stop_event.wait(timeout=1.0):
+                            break
                         continue
                     else:
-                        if self.stop_event.is_set():
+                        if self.stop_event.wait(timeout=2.0):
                             break
-                        time.sleep(2.0)
                         continue
 
                 else:

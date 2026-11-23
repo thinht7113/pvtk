@@ -19,38 +19,137 @@ from core.config import settings
 
 class FreeProxyManager:
     _proxies = []
-    _last_fetch = 0
+    _last_fetch = 0.0
+    _last_web_fetch = 0.0
     _lock = threading.Lock()
     _file_lock = threading.Lock()
     _background_thread = None
     _stop_event = threading.Event()
     _is_fetching = False
+    _proxy_usage = {}  # proxy_str -> active threads count
+    _proxy_fail_counts = {}  # proxy_str -> consecutive fail count
+
+    MAX_POOL_PROXIES = 120
+    MIN_WEB_FETCH_INTERVAL = 300.0
+    EMPTY_POOL_WEB_COOLDOWN = 60.0
+    MIN_FILE_RECHECK_INTERVAL = 60.0
+    MAX_RESERVOIR_CANDIDATES = 1500
+    CHECK_WORKERS = 20
+    DEAD_FAIL_THRESHOLD = 2
+    MAX_SAVED_PROXIES = 500
     
     @classmethod
     def start_background_worker(cls):
-        """Starts a background thread to continually scrape proxies if needed."""
+        """Starts a background thread to refresh proxies only when pool runs low."""
         with cls._lock:
-            cls._stop_event.clear()
+            if cls._stop_event.is_set():
+                return
             if cls._background_thread is None or not cls._background_thread.is_alive():
-                cls._background_thread = threading.Thread(target=cls._background_worker_loop, daemon=True)
+                cls._background_thread = threading.Thread(
+                    target=cls._background_worker_loop, daemon=True, name="FreeProxyBgWorker"
+                )
                 cls._background_thread.start()
 
     @classmethod
     def stop_background_worker(cls):
         cls._stop_event.set()
-        cls._is_fetching = False
 
     @classmethod
     def _background_worker_loop(cls):
         while not cls._stop_event.is_set():
             try:
-                # If we have less than 10 proxies or 5 minutes passed, fetch more
-                if len(cls._proxies) < 25 or time.time() - cls._last_fetch > 300:
-                    cls.fetch_proxies(force=True)
+                with cls._lock:
+                    pool_count = len(cls._proxies)
+                if pool_count < 20:
+                    cls.fetch_proxies(force=False)
             except Exception:
                 pass
-            if cls._stop_event.wait(timeout=30):
+            if cls._stop_event.wait(timeout=60):
                 break
+
+    @classmethod
+    def _merge_proxies(cls, new_valid):
+        """Merge newly validated proxies with existing healthy pool without wiping good ones."""
+        if not new_valid:
+            return
+        with cls._lock:
+            merged = []
+            seen = set()
+            for p in new_valid:
+                if p and p not in seen:
+                    seen.add(p)
+                    merged.append(p)
+                cls._proxy_fail_counts.pop(p, None)
+            for p in cls._proxies:
+                if p and p not in seen:
+                    seen.add(p)
+                    merged.append(p)
+            if len(merged) > cls.MAX_POOL_PROXIES:
+                merged = merged[:cls.MAX_POOL_PROXIES]
+            random.shuffle(merged)
+            cls._proxies = merged
+            cls._last_fetch = time.time()
+            active_set = set(cls._proxies)
+            for k in list(cls._proxy_usage.keys()):
+                if k not in active_set:
+                    cls._proxy_usage.pop(k, None)
+            for k in list(cls._proxy_fail_counts.keys()):
+                if k not in active_set:
+                    cls._proxy_fail_counts.pop(k, None)
+
+    @classmethod
+    def _check_socks5_candidate(cls, proxy_str: str):
+        if cls._stop_event.is_set():
+            return None
+        sock = None
+        try:
+            parts = proxy_str.split(":")
+            if len(parts) != 2 or not parts[1].isdigit():
+                return None
+            host, port = parts[0], int(parts[1])
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((host, port))
+            if cls._stop_event.is_set():
+                return None
+            if _connect_socks5(sock, settings.master_host, settings.master_port):
+                return f"socks5://{proxy_str}"
+        except Exception:
+            pass
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return None
+
+    @classmethod
+    def _check_candidates_pool(cls, candidates, target_valid: int = 50):
+        valid_proxies = []
+        if not candidates or cls._stop_event.is_set():
+            return valid_proxies
+        executor = ThreadPoolExecutor(max_workers=cls.CHECK_WORKERS)
+        try:
+            futures = [executor.submit(cls._check_socks5_candidate, p) for p in candidates]
+            for fut in as_completed(futures):
+                if cls._stop_event.is_set():
+                    for rem in futures:
+                        rem.cancel()
+                    break
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                if res:
+                    valid_proxies.append(res)
+                if len(valid_proxies) >= target_valid:
+                    for rem in futures:
+                        rem.cancel()
+                    break
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return valid_proxies
 
     @classmethod
     def fetch_proxies(cls, force=False):
@@ -59,82 +158,70 @@ class FreeProxyManager:
         with cls._lock:
             if cls._stop_event.is_set():
                 return
-            # Chỉ bỏ qua nếu còn trên 5 proxy hoạt động tốt VÀ chưa quá 10 phút
-            if not force and len(cls._proxies) > 20 and time.time() - cls._last_fetch < 600:
+            if not force and len(cls._proxies) >= 20 and time.time() - cls._last_fetch < 600:
                 return
             if cls._is_fetching:
-                return # Tránh đụng độ luồng ngầm và luồng chính
+                return  # Tránh đụng độ luồng ngầm và luồng chính
             cls._is_fetching = True
+            existing_set = set(cls._proxies)
+            pool_size = len(cls._proxies)
+            last_fetch = cls._last_fetch
 
+        reservoir = []
+        test_candidates = []
         try:
             if cls._stop_event.is_set():
                 return
-            print("\n\033[93m[AUTO PROXY]\033[0m Đang tìm kiếm Proxy SOCKS5 miễn phí (Ưu tiên Việt Nam)...")
-            
-            fetched_list = []
-            
-            # Load proxies_good.txt if exists
-            import os
-            try:
-                if os.path.exists("proxies_good.txt"):
-                    with open("proxies_good.txt", "r", encoding="utf-8") as f:
-                        for line in f:
-                            p = line.strip()
-                            if p and ":" in p:
-                                if p.startswith("socks5://"): p = p[9:]
-                                fetched_list.append(p)
-            except Exception:
-                pass
-                
-            valid_proxies = []
-            def check_proxy(proxy_str):
-                if cls._stop_event.is_set() or len(valid_proxies) >= 80:
-                    return
-                sock = None
-                try:
-                    host, port = proxy_str.split(":")
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(2.0) # Timeout ngắn để loại proxy lag
-                    sock.connect((host, int(port)))
-                    if cls._stop_event.is_set() or len(valid_proxies) >= 80:
-                        return
-                    if _connect_socks5(sock, settings.master_host, settings.master_port):
-                        valid_proxies.append(f"socks5://{proxy_str}")
-                except Exception:
-                    pass
-                finally:
-                    if sock is not None:
-                        try:
-                            sock.close()
-                        except Exception:
-                            pass
 
-            # Fast Lane: Nếu không bị bắt buộc ép tải từ web, thử kiểm tra proxy đã lưu trước
-            if not force and fetched_list:
-                # Chỉ kiểm tra tối đa 200 proxy gần nhất trong file để khởi động trong 2-3 giây
-                sample_list = fetched_list[-200:]
-                random.shuffle(sample_list)
-                with ThreadPoolExecutor(max_workers=50) as executor:
-                    futures = [executor.submit(check_proxy, p) for p in sample_list]
-                    for fut in as_completed(futures):
-                        if len(valid_proxies) >= 50 or cls._stop_event.is_set():
-                            for rem in futures:
-                                rem.cancel()
-                            break
-                    
-                if len(valid_proxies) >= 15:
+            # Phase 1 — Fast Lane: Always check proxies_good.txt first when pool < 20
+            import os
+            should_check_file = (
+                pool_size == 0
+                or force
+                or (time.time() - last_fetch >= cls.MIN_FILE_RECHECK_INTERVAL)
+            )
+            if pool_size < 20 and should_check_file and os.path.exists("proxies_good.txt"):
+                file_candidates = []
+                try:
+                    with cls._file_lock:
+                        with open("proxies_good.txt", "r", encoding="utf-8", errors="ignore") as f:
+                            for line in f:
+                                p = line.strip()
+                                if p.startswith("socks5://"):
+                                    p = p[9:]
+                                if p and ":" in p and f"socks5://{p}" not in existing_set:
+                                    file_candidates.append(p)
+                except Exception:
+                    file_candidates = []
+
+                if file_candidates:
+                    random.shuffle(file_candidates)
+                    sample_list = file_candidates[:150]
+                    valid_from_file = cls._check_candidates_pool(sample_list, target_valid=50)
+                    if valid_from_file:
+                        cls._merge_proxies(valid_from_file)
                     with cls._lock:
-                        cls._proxies = valid_proxies
-                        random.shuffle(cls._proxies)
-                        cls._last_fetch = time.time()
-                    print(f"\033[92m[AUTO PROXY]\033[0m Đã nạp siêu tốc {len(valid_proxies)} Proxy hoạt động tốt từ file lưu trữ!\n")
-                    # Bật luồng ngầm đi cào web thêm
-                    cls.start_background_worker()
-                    return
-                else:
-                    print("\033[93m[AUTO PROXY]\033[0m Proxy cũ đã chết nhiều, bắt đầu cào proxy mới từ Internet...")
-                    valid_proxies = [] # Reset lại để quét chung
-                    
+                        pool_size = len(cls._proxies)
+                    if pool_size >= 20:
+                        print(f"\033[92m[AUTO PROXY]\033[0m Đã nạp siêu tốc {len(valid_from_file)} Proxy hoạt động tốt từ file lưu trữ (Pool: {pool_size})!\n")
+                        cls.start_background_worker()
+                        return
+
+            if cls._stop_event.is_set():
+                return
+
+            # Phase 2 — Rate-Limited Streaming Web Scrape with Reservoir Sampling
+            now = time.time()
+            with cls._lock:
+                pool_size = len(cls._proxies)
+                existing_set = set(cls._proxies)
+            cooldown = cls.EMPTY_POOL_WEB_COOLDOWN if pool_size == 0 else cls.MIN_WEB_FETCH_INTERVAL
+            if now - cls._last_web_fetch < cooldown:
+                return
+            cls._last_web_fetch = now
+
+            print("\n\033[93m[AUTO PROXY]\033[0m Đang tìm kiếm Proxy SOCKS5 miễn phí (Ưu tiên Việt Nam)...")
+
             urls = [
                 # Vietnamese proxies first (priority)
                 "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=VN&ssl=all&anonymity=all",
@@ -160,68 +247,88 @@ class FreeProxyManager:
                 "https://proxyspace.pro/socks5.txt",
                 "https://spys.me/socks.txt",
             ]
-            
+
+            cap = cls.MAX_RESERVOIR_CANDIDATES
+            total_seen = 0
+            max_bytes_per_url = 2 * 1024 * 1024
+            max_lines_per_url = 30000
+
             for url in urls:
+                if cls._stop_event.is_set():
+                    break
                 try:
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        data = resp.read().decode('utf-8').splitlines()
-                    for line in data:
-                        line = line.strip()
-                        if line and ":" in line:
-                            fetched_list.append(line)
-                except Exception as e:
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        bytes_read = 0
+                        lines_read = 0
+                        while bytes_read < max_bytes_per_url and lines_read < max_lines_per_url:
+                            if cls._stop_event.is_set():
+                                break
+                            raw_line = resp.readline(512)
+                            if not raw_line:
+                                break
+                            bytes_read += len(raw_line)
+                            lines_read += 1
+                            line = raw_line.decode("utf-8", errors="ignore").strip()
+                            if not line or ":" not in line or len(line) > 64:
+                                continue
+                            total_seen += 1
+                            if len(reservoir) < cap:
+                                reservoir.append(line)
+                            else:
+                                j = random.randrange(total_seen)
+                                if j < cap:
+                                    reservoir[j] = line
+                except Exception:
                     pass
-            
-            if fetched_list:
+
+            if cls._stop_event.is_set():
+                return
+
+            if reservoir:
                 unique_list = []
                 seen = set()
-                for p in fetched_list:
-                    if p not in seen:
+                for p in reservoir:
+                    if p not in seen and f"socks5://{p}" not in existing_set:
                         unique_list.append(p)
                         seen.add(p)
-                fetched_list = unique_list
-                
-                # Trộn ngẫu nhiên và chỉ kiểm tra tối đa 250 proxy để hoàn thành trong 2-3s
-                random.shuffle(fetched_list)
-                test_candidates = fetched_list[:250]
-                
-                print(f"\033[93m[AUTO PROXY]\033[0m Đã tải {len(fetched_list)} proxies từ Web. Đang kiểm tra {len(test_candidates)} ứng viên (khoảng 3s)...")
-                
-                with ThreadPoolExecutor(max_workers=50) as executor:
-                    futures = [executor.submit(check_proxy, p) for p in test_candidates]
-                    for fut in as_completed(futures):
-                        if len(valid_proxies) >= 60 or cls._stop_event.is_set():
-                            for rem in futures:
-                                rem.cancel()
-                            break
+
+                random.shuffle(unique_list)
+                test_candidates = unique_list[:200]
+
+                print(f"\033[93m[AUTO PROXY]\033[0m Đã lấy mẫu {len(unique_list)} proxies (từ {total_seen} dòng web). Đang kiểm tra {len(test_candidates)} ứng viên...")
+                valid_proxies = cls._check_candidates_pool(test_candidates, target_valid=50)
 
                 if valid_proxies:
-                    with cls._lock:
-                        cls._proxies = valid_proxies
-                        random.shuffle(cls._proxies) # Shuffle để phân phối tải
-                        cls._last_fetch = time.time()
+                    cls._merge_proxies(valid_proxies)
                     for vp in valid_proxies:
                         cls.mark_proxy_good(vp)
-                    print(f"\033[92m[AUTO PROXY]\033[0m Lọc thành công {len(valid_proxies)} Proxy SIÊU NHANH & HOẠT ĐỘNG TỐT!\n")
+                    with cls._lock:
+                        new_pool_len = len(cls._proxies)
+                    print(f"\033[92m[AUTO PROXY]\033[0m Lọc thành công {len(valid_proxies)} Proxy mới (Tổng pool: {new_pool_len})!\n")
                 else:
                     with cls._lock:
                         cls._last_fetch = time.time()
-                    print("\033[91m[AUTO PROXY]\033[0m Tất cả Proxy miễn phí đều chết hoặc bị chặn bởi Game Server. Sẽ sử dụng IP thật.\n")
+                    print("\033[91m[AUTO PROXY]\033[0m Đợt quét web không có proxy mới sống, giữ nguyên pool hiện tại.\n")
             else:
                 with cls._lock:
                     cls._last_fetch = time.time()
-                print("\033[91m[AUTO PROXY]\033[0m Không lấy được Proxy SOCKS5 nào, sẽ sử dụng IP thật.\n")
+                print("\033[91m[AUTO PROXY]\033[0m Không lấy được Proxy SOCKS5 nào từ Web.\n")
         finally:
+            reservoir.clear()
+            test_candidates.clear()
+            del reservoir, test_candidates
             with cls._lock:
                 cls._is_fetching = False
 
-    MAX_SAVED_PROXIES = 500
-
     @classmethod
     def mark_proxy_good(cls, proxy_str):
-        """Save a good proxy to file (capped at MAX_SAVED_PROXIES) so we can reuse it next time."""
-        if not proxy_str or not proxy_str.startswith("socks5://"):
+        """Save a good proxy to file (capped at MAX_SAVED_PROXIES) and reset fail count."""
+        if not proxy_str:
+            return
+        with cls._lock:
+            cls._proxy_fail_counts.pop(proxy_str, None)
+        if not proxy_str.startswith("socks5://"):
             return
         import os
         try:
@@ -251,8 +358,6 @@ class FreeProxyManager:
         except Exception:
             pass
 
-    _proxy_usage = {} # proxy_str -> active threads count
-
     @classmethod
     def test_proxy_alive(cls, proxy_str: str, timeout: float = 2.5) -> bool:
         """Kiểm tra nhanh xem Proxy có kết nối được tới Game Server / Master Server không."""
@@ -281,11 +386,15 @@ class FreeProxyManager:
     @classmethod
     def acquire_proxy(cls, exclude_proxy=None):
         """Trả về 1 proxy có ít luồng sử dụng nhất từ pool đã được kiểm tra còn sống."""
-        import random
-        cls._stop_event.clear()
-        if not cls._proxies or len(cls._proxies) <= 3:
+        if cls._stop_event.is_set():
+            return None
+        with cls._lock:
+            pool_len = len(cls._proxies)
+            is_fetching = cls._is_fetching
+        if pool_len <= 3 and not is_fetching and not cls._stop_event.is_set():
             cls.fetch_proxies()
-            cls.start_background_worker()
+            if not cls._stop_event.is_set():
+                cls.start_background_worker()
             
         with cls._lock:
             if not cls._proxies:
@@ -313,14 +422,18 @@ class FreeProxyManager:
                 cls._proxy_usage[proxy_str] = max(0, cls._proxy_usage[proxy_str] - 1)
 
     @classmethod
-    def mark_proxy_dead(cls, proxy_str):
+    def mark_proxy_dead(cls, proxy_str, force=False):
         if not proxy_str:
             return
         with cls._lock:
+            cnt = cls._proxy_fail_counts.get(proxy_str, 0) + 1
+            cls._proxy_fail_counts[proxy_str] = cnt
+            if not force and cnt < cls.DEAD_FAIL_THRESHOLD:
+                return
             if proxy_str in cls._proxies:
                 cls._proxies.remove(proxy_str)
-            if proxy_str in cls._proxy_usage:
-                del cls._proxy_usage[proxy_str]
+            cls._proxy_usage.pop(proxy_str, None)
+            cls._proxy_fail_counts.pop(proxy_str, None)
 
     @classmethod
     def periodic_refresh(cls):
@@ -330,7 +443,7 @@ class FreeProxyManager:
         with cls._lock:
             current_count = len(cls._proxies)
         if current_count < 15:
-            cls.fetch_proxies(force=True)
+            cls.fetch_proxies(force=False)
 
     _accounts_file = None
     @classmethod
@@ -339,11 +452,13 @@ class FreeProxyManager:
 
     @classmethod
     def save_proxy_for_account(cls, username, password, proxy_str):
-        if not cls._accounts_file or not proxy_str: return
+        if not cls._accounts_file or not proxy_str:
+            return
         import os
         try:
-            with cls._lock:
-                if not os.path.exists(cls._accounts_file): return
+            with cls._file_lock:
+                if not os.path.exists(cls._accounts_file):
+                    return
                 with open(cls._accounts_file, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                 
@@ -364,15 +479,16 @@ class FreeProxyManager:
                         new_lines.append(line)
                 
                 if changed:
-                    with open(cls._accounts_file, "w", encoding="utf-8") as f:
+                    tmp_acc = f"{cls._accounts_file}.{os.getpid()}.tmp"
+                    with open(tmp_acc, "w", encoding="utf-8") as f:
                         f.writelines(new_lines)
+                    os.replace(tmp_acc, cls._accounts_file)
         except Exception:
             pass
 
     @classmethod
     def get_random_proxy(cls, exclude_proxy=None):
         """(Legacy) Trả về proxy ngẫu nhiên, nên dùng acquire_proxy để thay thế."""
-        cls._stop_event.clear()
         return cls.acquire_proxy(exclude_proxy)
 
     @classmethod
@@ -387,19 +503,31 @@ class FreeProxyManager:
         cls._stop_event.clear()
         cls.fetch_proxies()
         cls.start_background_worker()
-        if not cls._proxies:
+        with cls._lock:
+            has_proxies = bool(cls._proxies)
+        if not has_proxies or cls._stop_event.is_set():
             return accounts
 
-        # Kiểm tra song song tình trạng proxy của toàn bộ tài khoản (50 luồng) để hoàn thành trong 1-2 giây
+        # Kiểm tra song song tình trạng proxy của toàn bộ tài khoản
         dead_indices = set()
+        dead_lock = threading.Lock()
         def _check_acc_proxy(item):
+            if cls._stop_event.is_set():
+                return
             idx, acc = item
             p = acc[2] if len(acc) >= 3 else None
             if not p or not p.strip() or not cls.test_proxy_alive(p, timeout=1.5):
-                dead_indices.add(idx)
+                with dead_lock:
+                    dead_indices.add(idx)
 
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            executor.map(_check_acc_proxy, enumerate(accounts))
+        executor = ThreadPoolExecutor(max_workers=cls.CHECK_WORKERS)
+        try:
+            list(executor.map(_check_acc_proxy, enumerate(accounts)))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        if cls._stop_event.is_set():
+            return accounts
 
         new_accounts = []
         has_changes = False
@@ -420,7 +548,7 @@ class FreeProxyManager:
         # Tự động ghi lại file accounts_file để các lần chạy sau luôn có proxy sống
         if has_changes and cls._accounts_file and os.path.exists(cls._accounts_file):
             try:
-                with cls._lock:
+                with cls._file_lock:
                     lines = []
                     for acc in new_accounts:
                         u, p, pr = acc[0], acc[1], acc[2]
@@ -441,6 +569,8 @@ class FreeProxyManager:
         current_tuple = list(account_tuple)
         
         for attempt in range(max_retries):
+            if cls._stop_event.is_set():
+                break
             err = ""
             result = {"error": "Lỗi không xác định"}
             try:
@@ -459,7 +589,8 @@ class FreeProxyManager:
                     username = current_tuple[2]
                     print(f"\n[Tài khoản {idx}/{total} | {username}] \033[93m[ĐỔI PROXY TỰ ĐỘNG]\033[0m Lỗi ({err}).\n-> Thử lại lần {attempt+2}/{max_retries} với Proxy mới: {new_proxy}")
                     current_tuple[-1] = new_proxy
-                    time.sleep(1.0)
+                    if cls._stop_event.wait(timeout=1.0):
+                        return result
                     continue
             return result
             

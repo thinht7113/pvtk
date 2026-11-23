@@ -56,6 +56,7 @@ WorkingDirectory=$SCRIPT_DIR
 ExecStart=$PYTHON_PATH -u run_247.py
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
 LimitNOFILE=65536
 MemoryHigh=550M
 MemoryMax=750M
@@ -64,6 +65,9 @@ StandardError=journal
 Environment=PYTHONIOENCODING=utf-8
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=Asia/Ho_Chi_Minh
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
+Environment=MALLOC_MMAP_THRESHOLD_=131072
 
 [Install]
 WantedBy=multi-user.target
