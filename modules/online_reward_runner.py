@@ -116,9 +116,16 @@ class OnlineRewardRunner(CharacterLoopRunner):
         stop_event: Optional[threading.Event] = None,
         thread_name: str = "Tài khoản",
         max_retries: int = 10,
-        max_workers: Optional[int] = None
+        max_workers: Optional[int] = None,
+        proxy_rotation: bool = True
     ):
-        super().__init__(accounts=accounts, thread_name=thread_name, max_retries=max_retries, max_workers=max_workers)
+        super().__init__(
+            accounts=accounts,
+            thread_name=thread_name,
+            max_retries=max_retries,
+            proxy_rotation=proxy_rotation,
+            max_workers=max_workers,
+        )
         self.auto_cycle_characters = auto_cycle_characters
         self.slot_choice = slot_choice
         self.stop_event = stop_event or threading.Event()
@@ -929,16 +936,24 @@ class OnlineRewardRunner(CharacterLoopRunner):
                     break
                 self.log(f"{char_tag} \033[93m[KẾT NỐI LẠI]\033[0m Mất kết nối, đang đăng nhập lại (Lần {reconnect_attempts + 1}/10)...")
                 
-                # Chủ động đổi proxy lập tức khi mất kết nối
-                if proxy:
+                # Chủ động đổi proxy lập tức khi mất kết nối (giữ IP Chính riêng cho SpecialWatcher)
+                if self.proxy_rotation:
                     from modules.free_proxy import FreeProxyManager
-                    FreeProxyManager.release_proxy(proxy)
-                    FreeProxyManager.mark_proxy_dead(proxy)
+                    if proxy:
+                        FreeProxyManager.release_proxy(proxy)
+                        FreeProxyManager.mark_proxy_dead(proxy)
                     new_proxy = FreeProxyManager.acquire_proxy(exclude_proxy=proxy)
-                    if new_proxy and new_proxy != proxy:
-                        self.log(f"{char_tag} \033[93m[ĐỔI PROXY THÀNH CÔNG]\033[0m Chuyển từ {proxy} sang {new_proxy}")
-                        proxy = new_proxy
-                        FreeProxyManager.save_proxy_for_account(username, password, proxy)
+                    if new_proxy:
+                        if new_proxy != proxy:
+                            self.log(f"{char_tag} \033[93m[ĐỔI PROXY THÀNH CÔNG]\033[0m Chuyển từ {proxy} sang {new_proxy}")
+                            proxy = new_proxy
+                            FreeProxyManager.save_proxy_for_account(username, password, proxy)
+                    else:
+                        proxy = None
+                        reconnect_attempts += 1
+                        if self.stop_event.wait(timeout=5.0):
+                            break
+                        continue
                         
                 if self.stop_event.wait(timeout=1.0):
                     break
@@ -1171,11 +1186,19 @@ class OnlineRewardRunner(CharacterLoopRunner):
                         active_conn = None
                         if self.stop_event.wait(timeout=1.0):
                             break
-                        new_conn, new_login = AuthManager.reconnect_game_session(
-                            settings.game_host, settings.game_port,
-                            settings.master_host, settings.master_port,
-                            username, password, proxy=proxy
-                        )
+                        if self.proxy_rotation and not proxy:
+                            from modules.free_proxy import FreeProxyManager
+                            proxy = FreeProxyManager.acquire_proxy()
+                            if proxy:
+                                FreeProxyManager.save_proxy_for_account(username, password, proxy)
+                        if self.proxy_rotation and not proxy:
+                            new_conn, new_login = None, 0
+                        else:
+                            new_conn, new_login = AuthManager.reconnect_game_session(
+                                settings.game_host, settings.game_port,
+                                settings.master_host, settings.master_port,
+                                username, password, proxy=proxy
+                            )
                         if self.stop_event.is_set():
                             self._safe_close_conn(new_conn)
                             break
@@ -1191,13 +1214,14 @@ class OnlineRewardRunner(CharacterLoopRunner):
                                 self._safe_close_conn(active_conn)
                                 active_conn = None
                         if not new_conn or not enter_ok:
-                            # Proxy có thể đã die, thử đổi proxy từ FreeProxyManager
-                            if proxy:
+                            # Proxy có thể đã die, thử đổi proxy từ FreeProxyManager (không fallback IP Chính)
+                            if self.proxy_rotation:
                                 try:
                                     from modules.free_proxy import FreeProxyManager
-                                    curr_url = proxy.to_url() if hasattr(proxy, "to_url") else str(proxy)
-                                    FreeProxyManager.release_proxy(curr_url)
-                                    FreeProxyManager.mark_proxy_dead(curr_url)
+                                    curr_url = proxy.to_url() if (proxy and hasattr(proxy, "to_url")) else (str(proxy) if proxy else None)
+                                    if curr_url:
+                                        FreeProxyManager.release_proxy(curr_url)
+                                        FreeProxyManager.mark_proxy_dead(curr_url)
                                     new_px = FreeProxyManager.acquire_proxy(exclude_proxy=curr_url)
                                     if new_px:
                                         proxy = new_px

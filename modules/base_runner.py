@@ -213,28 +213,24 @@ class BaseAccountRunner:
                 # Otherwise, we retry
                 retries += 1
                 if retries < self.max_retries and not self.is_stopped():
-                    # Rotate Proxy on retry if enabled
-                    if (self.proxy_rotation or True) and len(task) >= 5:
+                    wait_sec = min(3.0, 0.5 * retries)
+                    # Rotate Proxy on retry if enabled (never fall back to VPS direct IP)
+                    if self.proxy_rotation and len(task) >= 5:
                         try:
                             old_proxy = task[4]
-                            # Nếu đã thử 2 lần proxy mà vẫn lỗi, thử fallback IP trực tiếp (None)
-                            if retries >= 3 and old_proxy is not None:
-                                new_proxy = None
-                                self.log(f"\n\033[93m[FALLBACK IP CHÍNH]\033[0m {task[2]} đã thử {retries} lần với Proxy thất bại. Chuyển sang kết nối IP Trực Tiếp...")
-                            else:
-                                new_proxy = FreeProxyManager.get_random_proxy(exclude_proxy=old_proxy)
-                            
-                            if new_proxy != old_proxy:
+                            new_proxy = FreeProxyManager.acquire_proxy(exclude_proxy=old_proxy)
+                            if new_proxy and new_proxy != old_proxy:
                                 task_list = list(task)
                                 task_list[4] = new_proxy
                                 task = tuple(task_list)
-                                if new_proxy:
-                                    self.log(f"\n\033[93m[ĐỔI PROXY THÀNH CÔNG]\033[0m {task[2]} chuyển từ {old_proxy} sang {new_proxy}")
+                                self.log(f"\n\033[93m[ĐỔI PROXY THÀNH CÔNG]\033[0m {task[2]} chuyển từ {old_proxy} sang {new_proxy}")
+                            elif not new_proxy:
+                                wait_sec = 3.0
                         except Exception as e:
                             self.log(f"\n\033[91m[LỖI ĐỔI PROXY]\033[0m {e}")
-                    
+
                     self.log(f"\n\033[93m[CHẠY LẠI {self.thread_name.upper()}]\033[0m {task[2]} gặp lỗi hoặc chưa xong. Thử lại lần {retries}/{self.max_retries}...")
-                    if self._wait_interruptible(0.1):
+                    if self._wait_interruptible(wait_sec):
                         break
 
             if last_res and accumulated_chars:
@@ -272,8 +268,23 @@ class BaseAccountRunner:
         current_proxy = base_proxy
         if self.proxy_rotation and not current_proxy:
             new_p = FreeProxyManager.acquire_proxy()
-            if new_p:
-                current_proxy = new_p
+            if not new_p:
+                if self._wait_interruptible(3.0):
+                    return {
+                        "username": username,
+                        "completed": False,
+                        "error": "Dừng bởi người dùng",
+                        "characters_results": []
+                    }
+                new_p = FreeProxyManager.acquire_proxy()
+            if not new_p:
+                return {
+                    "username": username,
+                    "completed": False,
+                    "error": "Đang chờ proxy sống",
+                    "characters_results": []
+                }
+            current_proxy = new_p
 
         # Extract specific host/port if provided (for multi-server functionality)
         g_host = task[5] if len(task) >= 10 else settings.game_host

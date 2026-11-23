@@ -422,6 +422,7 @@ class WatcherWorker:
         self.characters: List[CharacterInfo] = []
         self.login_setting: int = 0
         self.consecutive_failures = 0
+        self.consecutive_scan_errors = 0
         self.is_phone_active = False
         self.phone_active_until = 0.0
 
@@ -867,8 +868,14 @@ class WatcherWorker:
         if not ok:
             err_msg = getattr(conn, "last_enter_error", "") or "Server từ chối vào game!"
             err_lower = err_msg.lower()
-            is_conflict = ("bận" in err_lower or "client khác" in err_lower or "kẹt" in err_lower or "online" in err_lower)
-            if is_conflict:
+            is_server_busy = ("làm mới đang bận" in err_lower or "thử lại sau" in err_lower)
+            is_conflict = (not is_server_busy) and any(
+                kw in err_lower for kw in ("client khác", "nơi khác", "đang đăng nhập", "đang online", "kẹt")
+            )
+            if is_server_busy:
+                self.consecutive_failures += 1
+                print(f"\033[93m[ACC {self.idx}: {self.user}]\033[0m Server tạm bận ({err_msg}), sẽ thử lại...", flush=True)
+            elif is_conflict:
                 self.is_phone_active = True
                 self.phone_active_until = time.time() + 60.0
                 print(f"[{time.strftime('%H:%M:%S')}] \033[93m[ACC {self.idx}: {self.user}]\033[0m Phát hiện đang chơi trên điện thoại hoặc phiên bận ({err_msg}). Tạm lùi bước nhường phiên trong 60 giây...", flush=True)
@@ -886,6 +893,7 @@ class WatcherWorker:
             return False
 
         self.consecutive_failures = 0
+        self.consecutive_scan_errors = 0
         self.is_phone_active = False
         self.phone_active_until = 0.0
         self.conn = conn
@@ -949,7 +957,10 @@ class WatcherWorker:
             else:
                 err_msg = f"Dịch chuyển từ '{curr_map}' sang map Tân Nguyệt Trấn thất bại!"
                 print(f"[{time.strftime('%H:%M:%S')}] \033[91m[ACC {self.idx}: {self.user} - LỖI DỊCH CHUYỂN]\033[0m {err_msg}", flush=True)
-                self.manager.notify_npc_error_telegram(self, target_npc, err_msg)
+                if self.conn and self.conn.is_connected:
+                    self.manager.notify_npc_error_telegram(self, target_npc, err_msg)
+                else:
+                    self._close_conn()
                 return False
 
         # Nếu role là idle thì không cần kiểm tra NPC chợ
@@ -974,7 +985,10 @@ class WatcherWorker:
 
         if not verify_ok:
             print(f"[{time.strftime('%H:%M:%S')}] \033[91m[ACC {self.idx}: {self.user} - LỖI NPC]\033[0m {err_detail}", flush=True)
-            self.manager.notify_npc_error_telegram(self, target_npc, err_detail)
+            if self.conn and self.conn.is_connected:
+                self.manager.notify_npc_error_telegram(self, target_npc, err_detail)
+            else:
+                self._close_conn()
             return False
 
         return True
@@ -1242,7 +1256,7 @@ class WatcherWorker:
                     if not self.conn.send_message(msg):
                         return False, {}, "Gửi gói tin 0x2B22 thất bại"
 
-                    res = self.wait_for_packet(0x2B22, timeout=4.0)
+                    res = self.wait_for_packet(0x2B22, timeout=6.0)
                     if res:
                         break
                     time.sleep(0.2)
@@ -1323,7 +1337,7 @@ class WatcherWorker:
                     if not self.conn.send_message(msg):
                         return False, {}, "Gửi gói tin 0x34CC thất bại"
 
-                    res = self.wait_for_packet(0x34CC, timeout=4.0)
+                    res = self.wait_for_packet(0x34CC, timeout=6.0)
                     if res:
                         break
                     time.sleep(0.2)
@@ -1406,13 +1420,17 @@ class WatcherWorker:
         while self.is_running and self.manager.is_running:
             try:
                 if not self.conn or not self.conn.is_connected:
-                    reconnect_attempts += 1
                     if self.is_phone_active and time.time() < self.phone_active_until:
-                        sleep_time = min(10.0, max(2.0, self.phone_active_until - time.time()))
+                        rem = int(self.phone_active_until - time.time())
+                        print(f"[{time.strftime('%H:%M:%S')}] \033[93m[ACC {self.idx}: {self.user}]\033[0m Đang nhường phiên chơi trên điện thoại (còn {rem}s)...", flush=True)
+                        sleep_time = min(10.0, max(1.0, self.phone_active_until - time.time()))
                         time.sleep(sleep_time)
-                    else:
-                        backoff = min(60.0, 3.0 * (1.8 ** min(reconnect_attempts - 1, 5)))
-                        time.sleep(backoff)
+                        continue
+                    self.is_phone_active = False
+
+                    reconnect_attempts += 1
+                    backoff = min(60.0, 3.0 * (1.8 ** min(reconnect_attempts - 1, 5)))
+                    time.sleep(backoff)
 
                     if not self.login_and_enter():
                         if reconnect_attempts >= 5:
@@ -1978,22 +1996,46 @@ class MultiAccountMarketWatcher:
             sys.stdout.flush()
             self.in_place_active = True
 
+    def _handle_scan_error(self, worker: WatcherWorker, err: str, kind_label: str, alert_title: str, source: str):
+        """Ghi nhận lỗi quét chợ, chỉ cảnh báo Telegram khi lỗi >= 3 lần liên tiếp và đóng socket nếu bị đứt."""
+        worker.consecutive_scan_errors = getattr(worker, "consecutive_scan_errors", 0) + 1
+        with self.print_lock:
+            self.clear_in_place_line()
+            print(f"\033[91m[ACC {worker.idx} - {kind_label} (Lần {worker.consecutive_scan_errors})]\033[0m {err}", flush=True)
+
+        err_low = (err or "").lower()
+        conn_dead = (
+            not worker.conn
+            or not worker.conn.is_connected
+            or "mất kết nối" in err_low
+            or "gửi gói tin" in err_low
+        )
+        if conn_dead:
+            worker._close_conn()
+
+        if worker.consecutive_scan_errors >= 3:
+            try:
+                from core.tele_notifier import TeleNotifier
+                TeleNotifier.get_instance().send_error_alert(
+                    f"{alert_title} (Acc {worker.idx})",
+                    f"Tài khoản: {worker.user}\nLỗi liên tiếp: {worker.consecutive_scan_errors} lần\nLỗi: {err}",
+                    source=source,
+                    cooldown=120.0,
+                )
+            except Exception:
+                pass
+
+        if (not conn_dead) and worker.conn and worker.conn.is_connected and worker.consecutive_scan_errors >= 2:
+            worker.ensure_npc_and_map()
+
     def do_character_scan_step(self, worker: WatcherWorker):
         """Tiến trình quét Sở Giao Dịch Nhân Vật (Acc 1)."""
         self.next_char_scan_time = time.time() + getattr(self, "scan_interval", 15.0)
         ok, current_chars, err = worker.fetch_market_characters()
         if not ok:
-            with self.print_lock:
-                self.clear_in_place_line()
-                print(f"\033[91m[ACC {worker.idx} - LỖI QUÉT NHÂN VẬT]\033[0m {err}", flush=True)
-            try:
-                from core.tele_notifier import TeleNotifier
-                TeleNotifier.get_instance().send_error_alert(f"Lỗi Quét Nhân Vật (Acc {worker.idx})", f"Tài khoản: {worker.user}\nLỗi: {err}", source="SGD Nhân Vật", cooldown=120.0)
-            except Exception:
-                pass
-            # Kiểm tra xem có bị rời khỏi map Tân Nguyệt Trấn không, nếu có thì tự động dịch chuyển lại
-            worker.ensure_npc_and_map()
+            self._handle_scan_error(worker, err, "LỖI QUÉT NHÂN VẬT", "Lỗi Quét Nhân Vật", "SGD Nhân Vật")
             return
+        worker.consecutive_scan_errors = 0
 
         curr_time = time.strftime("%H:%M:%S")
         with self.char_lock:
@@ -2182,16 +2224,9 @@ class MultiAccountMarketWatcher:
 
         ok, current_items, err = worker.fetch_market_items()
         if not ok:
-            with self.print_lock:
-                self.clear_in_place_line()
-                print(f"\033[91m[ACC {worker.idx} - LỖI QUÉT VẬT PHẨM]\033[0m {err}", flush=True)
-            try:
-                from core.tele_notifier import TeleNotifier
-                TeleNotifier.get_instance().send_error_alert(f"Lỗi Quét Vật Phẩm (Acc {worker.idx})", f"Tài khoản: {worker.user}\nLỗi: {err}", source="SGD Vật Phẩm", cooldown=120.0)
-            except Exception:
-                pass
-            worker.ensure_npc_and_map()
+            self._handle_scan_error(worker, err, "LỖI QUÉT VẬT PHẨM", "Lỗi Quét Vật Phẩm", "SGD Vật Phẩm")
             return
+        worker.consecutive_scan_errors = 0
 
         curr_time = time.strftime("%H:%M:%S")
         with self.item_lock:

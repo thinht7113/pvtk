@@ -552,7 +552,8 @@ class PVTKMaster247:
                         auto_cycle_characters=True,
                         slot_choice=1,
                         stop_event=self.online_reward_stop_event,
-                        max_workers=len(pending_accounts)
+                        max_workers=len(pending_accounts),
+                        proxy_rotation=bool(self.config.get("use_proxy", True))
                     )
                     self.online_reward_runner = runner
                     runner.run_all()
