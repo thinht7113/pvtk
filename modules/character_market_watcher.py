@@ -11,6 +11,7 @@ Hỗ trợ đa tài khoản (tối đa 4 tài khoản từ accountsNV.txt):
 import sys
 import os
 import time
+import json
 import base64
 import random
 import subprocess
@@ -90,7 +91,7 @@ from core.network import PVTKConnection
 import core.protocol as proto
 from modules.auth import AuthManager, CharacterInfo
 from modules.exp_ticket_sender import Item
-from modules.item_price_tracker import ItemPriceTracker
+from modules.item_price_tracker import ItemPriceTracker, normalize_item_name, infer_enhance_tier
 from modules.free_proxy import FreeProxyManager
 from modules.teleport import MapTeleporter, QUANG_TRUONG_CHILD_MAP_ID
 from modules.daily_history import DailyHistoryManager
@@ -201,28 +202,53 @@ def format_price_str(gold: int, silver: int) -> str:
     return " + ".join(parts)
 
 
+EQUIP_CATEGORIES = {
+    "Kiếm", "Đao", "Súng", "Trượng", "Cung",
+    "Nặng", "Trường Thương", "PhápKhí", "Hộ giáp", "SứcPhẩm"
+}
+
+
+def _get_equipment_enhance_tier(it_dict: Dict[str, Any]) -> int:
+    """Phân tách trang bị đã cường hóa/khảm (+CH) khỏi đồ trắng."""
+    return infer_enhance_tier(it_dict)
+
+
+def format_enhance_badge(it_dict: Dict[str, Any]) -> str:
+    """Hiển thị nhãn cường hóa/khảm/phù ma ngắn gọn cho trang bị."""
+    if it_dict.get("category", "") not in EQUIP_CATEGORIES:
+        return ""
+    parts = []
+    star = max(0, int(it_dict.get("upgrade_star", 0) or 0), int(it_dict.get("star", 0) or 0))
+    asc = max(0, int(it_dict.get("ascension_star", 0) or 0))
+    attach = max(0, int(it_dict.get("attach_done", 0) or 0))
+    if asc > 0:
+        parts.append(f"Thăng Tinh +{asc}")
+    elif star > 0:
+        parts.append(f"⭐+{star}")
+    if attach > 0:
+        parts.append(f"Khảm {attach}")
+    if it_dict.get("has_enchant"):
+        parts.append("Phù Ma")
+    if not parts:
+        return ""
+    return f" [{' | '.join(parts)}]"
+
+
 def check_item_snipe_criteria(grade: int, gold: int, silver: int) -> Tuple[bool, str]:
-    if gold == 0:
-        if grade == 4 and silver < 100000:
-            return True, "Truyền Thuyết (Tím) < 100,000 Bạc"
-        if grade in (3, 4) and silver < 10000:
-            grade_name = "Tím" if grade == 4 else "Vàng"
-            return True, f"{grade_name} < 10,000 Bạc"
-    if gold > 0 and gold <= 5 and grade >= 3:
-        grade_name = "Tím" if grade == 4 else "Cam"
-        return True, f"Đồ {grade_name} siêu rẻ ({gold} Vàng)"
+    """Giữ chữ ký tương thích ngược; đánh giá kèo rẻ hiện do ItemPriceTracker đảm nhiệm."""
     return False, ""
 
 
-
 def group_identical_items(items_dict: Dict[int, Dict[str, Any]], item_ids: Set[int]) -> List[Dict[str, Any]]:
-    """Gộp các vật phẩm giống hệt nhau (tên, phẩm chất, số lượng, giá bán) để log gọn gàng không bị spam lặp lại."""
+    """Gộp các vật phẩm giống hệt nhau (tên chuẩn hóa, phẩm chất, tier cường hóa, số lượng, giá bán)."""
     groups: Dict[Tuple, Dict[str, Any]] = {}
     for gid in item_ids:
         if gid not in items_dict:
             continue
         it = items_dict[gid]
-        key = (it["name"], it["grade"], it["quantity"], it["gold"], it["silver"])
+        norm_name = normalize_item_name(it.get("name", ""))
+        tier = _get_equipment_enhance_tier(it)
+        key = (norm_name, it["grade"], tier, it["quantity"], it["gold"], it["silver"])
         if key not in groups:
             groups[key] = {
                 "sample": it,
@@ -1324,19 +1350,30 @@ class WatcherWorker:
                         continue
 
                     cat = get_sgd_broad_category(it.type)
-                    items[good_id] = {
+                    clean_name = normalize_item_name(it.name)
+                    if not clean_name:
+                        continue
+                    item_record: Dict[str, Any] = {
                         "good_id": good_id,
                         "item_id": it.id,
-                        "name": it.name,
+                        "name": clean_name,
                         "grade": it.grade,
                         "type": it.type,
                         "category": cat,
-                        "req_lv": it.reqLv,
+                        "req_lv": max(0, int(getattr(it, "reqLv", 0) or 0)),
+                        "star": max(0, int(getattr(it, "star", 0) or 0)),
+                        "ascension_star": max(0, int(getattr(it, "ascensionStar", 0) or 0)),
+                        "upgrade_star": max(0, int(getattr(it, "upgradeStar", 0) or 0)),
+                        "attach_done": max(0, int(getattr(it, "attachDone", 0) or 0)),
+                        "is_upgrade": bool(getattr(it, "isUpgradeItem", False)),
+                        "has_enchant": bool((getattr(it, "enchantPower1", 0) or 0) > 0 or (getattr(it, "enchantPower2", 0) or 0) > 0),
                         "quantity": qty,
                         "gold": gold,
                         "silver": silver,
                         "first_seen": time.time()
                     }
+                    item_record["enhance_tier"] = _get_equipment_enhance_tier(item_record)
+                    items[good_id] = item_record
 
                 if len(items) >= total_market_size or size < page_size or size == 0:
                     break
@@ -1453,10 +1490,15 @@ class MultiAccountMarketWatcher:
         storage_item_file: str = "storage/market_items.json",
         telegram_bot = None
     ):
-        self.accounts_file = accounts_file
-        self.storage_char_file = storage_char_file
-        self.storage_item_file = storage_item_file
-        self.storage_price_file = "storage/item_price_history.json"
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.accounts_file = self._resolve_path(accounts_file)
+        self.storage_char_file = self._resolve_path(storage_char_file)
+        self.storage_item_file = self._resolve_path(storage_item_file)
+        self.storage_price_file = self._resolve_path("storage/item_price_history.json")
+        self.config_path = self._resolve_path("config_247.json")
+        self._cached_mkt_cfg: Optional[Dict[str, Any]] = None
+        self._cached_cfg_mtime: float = 0.0
+
         self.price_tracker = ItemPriceTracker(db_path=self.storage_price_file)
         self.telegram_bot = telegram_bot
         if telegram_bot:
@@ -1477,16 +1519,49 @@ class MultiAccountMarketWatcher:
         self.char_lock = threading.Lock()
         self.item_lock = threading.Lock()
 
-        self.scan_interval = 15.0
-        try:
-            with open("config_247.json", "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                self.scan_interval = float(cfg.get("market_watcher", {}).get("scan_interval_sec", 15.0))
-        except Exception:
-            pass
+        mkt_cfg = self._load_market_config()
+        self.scan_interval = float(mkt_cfg.get("scan_interval_sec", 15.0))
 
         self.next_char_scan_time = time.time() + self.scan_interval
         self.next_item_scan_time = time.time() + self.scan_interval
+
+    def _resolve_path(self, path_str: str) -> str:
+        if not path_str or os.path.isabs(path_str):
+            return path_str
+        return os.path.join(self.base_dir, path_str)
+
+    def _load_market_config(self) -> Dict[str, Any]:
+        """Nạp cấu hình market_watcher từ config_247.json (cache theo mtime)."""
+        defaults: Dict[str, Any] = {
+            "scan_interval_sec": 15.0,
+            "item_notify": True,
+            "notify_mode": "deals_only",
+            "item_min_grade": 0,
+            "tracked_categories": ["Tất cả"],
+            "min_discount_pct": 30.0,
+            "min_floor_discount_pct": 15.0,
+            "min_profit_gold": 10.0,
+            "min_samples": 3,
+            "silver_per_gold": 50000.0,
+            "watchlist_keywords": []
+        }
+        try:
+            if os.path.exists(self.config_path):
+                mtime = os.path.getmtime(self.config_path)
+                if self._cached_mkt_cfg is not None and mtime == self._cached_cfg_mtime:
+                    return self._cached_mkt_cfg
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                mw = raw.get("market_watcher", {})
+                merged = dict(defaults)
+                if isinstance(mw, dict):
+                    merged.update(mw)
+                self._cached_mkt_cfg = merged
+                self._cached_cfg_mtime = mtime
+                return merged
+        except Exception:
+            pass
+        return defaults
 
     def load_saved_data(self, file_path: str) -> Dict[int, Dict[str, Any]]:
         if not os.path.exists(file_path):
@@ -1636,29 +1711,118 @@ class MultiAccountMarketWatcher:
             except Exception:
                 pass
 
-    def notify_new_items(self, grouped: List[Dict[str, Any]], total_count: int):
-        """Gửi thông báo Telegram khi có vật phẩm mới lên sàn (tích hợp phân tích giá thông minh)."""
+    def _format_single_deal_toast(self, grp: Dict[str, Any], silver_per_gold: float) -> Tuple[str, str, str]:
+        it = grp["sample"]
+        cnt = int(grp.get("count", 1) or 1)
+        lot_toast = f" ({cnt} lô)" if cnt > 1 else ""
+        grade_info = get_grade_info(it["grade"])
+        icon = grade_info.get("icon", "⚪")
+        cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
+        cat_icon = get_category_icon(cat)
+        cat_tag = f"[{cat_icon} {cat}]"
+        price_str = format_price_str(it["gold"], it["silver"])
+        analysis = grp.get("analysis", {})
+        enh_badge = format_enhance_badge(it)
+
+        unit_info = ""
+        if it["quantity"] > 1:
+            if it["gold"] > 0:
+                u_gold = round(it["gold"] / it["quantity"], 1)
+                unit_info = f" <i>(Đơn giá: {u_gold:,} Vàng/món)</i>"
+            elif it["silver"] > 0:
+                u_silver = round(it["silver"] / it["quantity"])
+                unit_info = f" <i>(Đơn giá: {u_silver:,} Bạc/món)</i>"
+
+        currency = analysis.get("currency", "gold" if it.get("gold", 0) > 0 else "silver")
+        market_context = []
+        ref_samples = int(analysis.get("ref_samples", 0) or 0)
+
+        if currency == "gold":
+            m_med_g = analysis.get("market_gold_median", 0.0)
+            live_fl_g = analysis.get("live_gold_floor")
+            if m_med_g and m_med_g > 0:
+                market_context.append(f"Trung vị: <b>{m_med_g:,.1f} V/món</b>")
+            if live_fl_g is not None and live_fl_g > 0:
+                market_context.append(f"Sàn đang bán: <b>{live_fl_g:,.1f} V/món</b>")
+        else:
+            m_med_g = analysis.get("market_gold_median", 0.0)
+            live_fl_g = analysis.get("live_gold_floor")
+            if m_med_g and m_med_g >= 20.0:
+                u_s = analysis.get("unit_silver", 0.0)
+                eq_g = round(u_s / silver_per_gold, 1) if (u_s and silver_per_gold > 0) else 0.0
+                if eq_g > 0:
+                    market_context.append(f"Quy đổi: <b>~{eq_g:,.1f} V/món</b>")
+                market_context.append(f"Trung vị Vàng: <b>{m_med_g:,.1f} V/món</b>")
+                if live_fl_g is not None and live_fl_g > 0:
+                    market_context.append(f"Sàn Vàng: <b>{live_fl_g:,.1f} V/món</b>")
+            else:
+                m_med_s = analysis.get("market_silver_median", 0.0)
+                live_fl_s = analysis.get("live_silver_floor")
+                if m_med_s and m_med_s > 0:
+                    market_context.append(f"Trung vị: <b>{m_med_s:,.0f} Bạc/món</b>")
+                if live_fl_s is not None and live_fl_s > 0:
+                    market_context.append(f"Sàn đang bán: <b>{live_fl_s:,.0f} Bạc/món</b>")
+
+        if ref_samples > 0:
+            market_context.append(f"Mẫu: {ref_samples}")
+
+        is_bargain = bool(grp.get("is_bargain") or analysis.get("is_bargain"))
+        is_watchlist = bool(grp.get("is_watchlist"))
+        disc = float(grp.get("discount_percent", 0.0) or 0.0)
+        disc_tag = f" (-{disc:.0f}%)" if disc > 0 else ""
+
+        if is_bargain and is_watchlist:
+            title = f"🔥🎯 SĂN KÈO RẺ WATCHLIST!{disc_tag}"
+        elif is_bargain:
+            title = f"🔥 SĂN ĐỒ RẺ THỊ TRƯỜNG!{disc_tag}"
+        elif is_watchlist:
+            title = f"🎯 WATCHLIST: {cat_tag} VẬT PHẨM QUAN TÂM!"
+        else:
+            title = f"SỞ GIAO DỊCH: {cat_tag} VẬT PHẨM MỚI!"
+
+        s_itname = html.escape(normalize_item_name(str(it["name"])))
+        s_enh = html.escape(enh_badge)
+        line1 = f"{icon} <b>{s_itname}</b>{s_enh} x{it['quantity']}{lot_toast} • <i>{html.escape(cat_tag)}</i>"
+        lines2 = [f"💰 <b>Giá bán:</b> <b>{price_str}</b>{unit_info}"]
+
+        if market_context:
+            lines2.append("📊 " + " | ".join(market_context))
+
+        est_g = float(grp.get("estimated_profit_gold", 0.0) or analysis.get("estimated_profit_gold", 0.0) or 0.0)
+        est_s = float(grp.get("estimated_profit_silver", 0.0) or analysis.get("estimated_profit_silver", 0.0) or 0.0)
+        if is_bargain:
+            if est_g > 0:
+                lines2.append(f"💎 <b>Lãi ước tính:</b> <b>+{est_g:,.1f} Vàng</b>")
+            elif est_s > 0:
+                lines2.append(f"💎 <b>Lãi ước tính:</b> <b>+{est_s:,.0f} Bạc</b>")
+
+        reasons = [html.escape(str(r)) for r in grp.get("reasons", [])]
+        if reasons:
+            lines2.append(f"💡 <b>Đánh giá:</b> {', '.join(reasons)}")
+
+        return title, line1, "\n".join(lines2)
+
+    def notify_new_items(self, grouped: List[Dict[str, Any]], total_count: int = 0):
+        """Gửi thông báo Telegram khi có Kèo Rẻ / Watchlist (hoặc thêm đồ mới nếu bật notify_mode='all')."""
         if not grouped:
             return
 
-        min_grade = 0
-        tracked_cats = ["Tất cả"]
-        try:
-            cfg_path = "config_247.json"
-            if os.path.exists(cfg_path):
-                import json
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                    min_grade = cfg.get("market_watcher", {}).get("item_min_grade", 0)
-                    tracked_cats = cfg.get("market_watcher", {}).get("tracked_categories", ["Tất cả"])
-        except Exception:
-            pass
+        market_cfg = self._load_market_config()
+        if not market_cfg.get("item_notify", True):
+            return
+
+        notify_mode = str(market_cfg.get("notify_mode", "deals_only")).strip().lower()
+        min_grade = int(market_cfg.get("item_min_grade", 0) or 0)
+        tracked_cats = market_cfg.get("tracked_categories", ["Tất cả"])
+        silver_per_gold = float(market_cfg.get("silver_per_gold", 50000.0) or 50000.0)
 
         allow_all_cats = True
         if isinstance(tracked_cats, list) and tracked_cats and "Tất cả" not in tracked_cats:
             allow_all_cats = False
 
-        eligible_groups = []
+        priority_groups: List[Dict[str, Any]] = []
+        normal_groups: List[Dict[str, Any]] = []
+
         for grp in grouped:
             it = grp["sample"]
             cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
@@ -1666,144 +1830,113 @@ class MultiAccountMarketWatcher:
                 continue
 
             analysis = grp.get("analysis", {})
-
-            # Kết hợp cả tiêu chí phân tích giá thông minh và tiêu chí cũ
-            is_bargain = grp.get("is_bargain", False) or analysis.get("is_bargain", False)
-            is_rare = grp.get("is_rare", False) or analysis.get("is_rare", False)
-
-            # Tiêu chí cũ fallback
-            old_snipe, old_reason = check_item_snipe_criteria(it["grade"], it["gold"], it["silver"])
-            if old_snipe:
-                is_bargain = True
-                if not grp.get("reasons"):
-                    grp["reasons"] = [old_reason]
-                elif old_reason not in grp["reasons"]:
-                    grp["reasons"].append(old_reason)
+            is_bargain = bool(grp.get("is_bargain", False) or analysis.get("is_bargain", False))
+            is_watchlist = bool(grp.get("is_watchlist", False))
+            grade = int(it.get("grade", 0) or 0)
 
             grp["is_snipe"] = is_bargain
-            grp["is_rare"] = is_rare
+            grp["is_bargain"] = is_bargain
+            grp["is_watchlist"] = is_watchlist
+            grp["is_rare"] = False
 
-            if is_bargain or is_rare or it["grade"] >= min_grade:
-                eligible_groups.append(grp)
+            if is_bargain or is_watchlist:
+                if is_watchlist or grade >= min_grade:
+                    priority_groups.append(grp)
+            elif notify_mode == "all" and grade >= min_grade:
+                normal_groups.append(grp)
 
-        if not eligible_groups:
-            return
+        # Ưu tiên gửi riêng từng Kèo Rẻ / Watchlist để không bị chìm thông tin định giá
+        if priority_groups:
+            priority_groups.sort(key=lambda g: (
+                not g.get("is_watchlist", False),
+                -float(g.get("estimated_profit_gold", 0.0) or 0.0),
+                -float(g.get("discount_percent", 0.0) or 0.0),
+                -int(g["sample"].get("grade", 0) or 0)
+            ))
 
-        # Sắp xếp ưu tiên: Kèo rẻ (🔥) lên đầu tiên, tiếp theo là Đồ hiếm (💎), rồi đến phẩm chất cao
-        eligible_groups.sort(key=lambda g: (
-            not g.get("is_snipe", False),
-            not g.get("is_rare", False),
-            -g["sample"].get("grade", 0)
-        ))
-
-        # Nếu chỉ có đúng 1 loại vật phẩm mới, gửi thông báo chi tiết
-        if len(eligible_groups) == 1:
-            grp = eligible_groups[0]
-            it = grp["sample"]
-            cnt = grp["count"]
-            lot_toast = f" ({cnt} lô)" if cnt > 1 else ""
-            grade_info = get_grade_info(it["grade"])
-            icon = grade_info.get("icon", "⚪")
-            cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
-            cat_icon = get_category_icon(cat)
-            cat_tag = f"[{cat_icon} {cat}]"
-            price_str = format_price_str(it["gold"], it["silver"])
-            analysis = grp.get("analysis", {})
-
-            # Tính đơn giá hiển thị nếu số lượng > 1
-            unit_info = ""
-            if it["quantity"] > 1:
-                u_gold = round(it["gold"] / it["quantity"], 1) if it["gold"] > 0 else 0
-                u_silver = round(it["silver"] / it["quantity"]) if it["silver"] > 0 else 0
-                u_parts = []
-                if u_gold > 0: u_parts.append(f"{u_gold:,} Vàng/món")
-                if u_silver > 0: u_parts.append(f"{u_silver:,} Bạc/món")
-                if u_parts:
-                    unit_info = f" <i>(Đơn giá: {', '.join(u_parts)})</i>"
-
-            market_context = []
-            m_avg_gold = analysis.get("market_gold_avg", 0.0)
-            m_min_gold = analysis.get("market_gold_min")
-            if m_avg_gold and m_avg_gold > 0:
-                market_context.append(f"• Giá thị trường TB: <b>~{m_avg_gold:,.1f} Vàng/món</b>")
-            if m_min_gold is not None:
-                market_context.append(f"• Rẻ nhất từng thấy: <b>{m_min_gold:,.1f} Vàng</b>")
-
-            reasons = [html.escape(str(r)) for r in grp.get("reasons", [])]
-            reason_str = f"\n💡 <b>Đánh giá:</b> {', '.join(reasons)}" if reasons else ""
-
-            if grp.get("is_snipe"):
-                disc = grp.get("discount_percent", 0.0)
-                disc_tag = f" (GIẢM {disc:.0f}%)" if disc > 0 else ""
-                title = f"🔥 SĂN ĐỒ RẺ THỊ TRƯỜNG!{disc_tag}"
-            elif grp.get("is_rare"):
-                title = f"💎 {cat_tag} VẬT PHẨM HIẾM LÊN SÀN!"
+            if len(priority_groups) <= 5:
+                for grp in priority_groups:
+                    title, line1, line2 = self._format_single_deal_toast(grp, silver_per_gold)
+                    WindowsNotifier.send_toast(title, line1, line2)
             else:
-                title = f"SỞ GIAO DỊCH: {cat_tag} VẬT PHẨM MỚI!"
+                summary_lines = []
+                for grp in priority_groups:
+                    it = grp["sample"]
+                    analysis = grp.get("analysis", {})
+                    cnt = int(grp.get("count", 1) or 1)
+                    lot_str = f" (x{cnt} lô)" if cnt > 1 else ""
+                    icon = get_grade_info(it["grade"]).get("icon", "⚪")
+                    cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
+                    cat_icon = get_category_icon(cat)
+                    price_str = format_price_str(it["gold"], it["silver"])
+                    disc = float(grp.get("discount_percent", 0.0) or 0.0)
+                    badge = "🎯" if grp.get("is_watchlist") else ""
+                    if grp.get("is_bargain"):
+                        badge += f"🔥[-{disc:.0f}%] " if disc > 0 else "🔥[RẺ] "
+                    else:
+                        badge += " "
 
-            s_itname = html.escape(str(it['name']))
-            line1 = f"{icon} <b>{s_itname}</b> x{it['quantity']}{lot_toast} • <i>{cat_tag}</i>"
-            lines2 = [f"💰 <b>Giá bán:</b> <b>{price_str}</b>{unit_info}"]
-            if market_context:
-                lines2.append(f"📊 " + " | ".join(market_context))
-            if reason_str:
-                lines2.append(reason_str)
+                    m_name = html.escape(normalize_item_name(str(it["name"])))
+                    m_enh = html.escape(format_enhance_badge(it))
+                    med_g = analysis.get("market_gold_median", 0.0)
+                    est_g = float(grp.get("estimated_profit_gold", 0.0) or 0.0)
+                    extra_parts = []
+                    if med_g and med_g > 0:
+                        extra_parts.append(f"TV: {med_g:,.1f}V")
+                    if est_g > 0:
+                        extra_parts.append(f"Lãi: +{est_g:,.1f}V")
+                    extra_str = f" ({', '.join(extra_parts)})" if extra_parts else ""
 
-            WindowsNotifier.send_toast(
-                title,
-                line1,
-                "\n".join(lines2)
-            )
-            return
+                    summary_lines.append(
+                        f"{badge}[{cat_icon}{html.escape(cat)}] {icon} <b>{m_name}</b>{m_enh} x{it['quantity']}{lot_str} — <b>{price_str}</b>{extra_str}"
+                    )
 
-        # Nhiều vật phẩm mới: format danh sách gọn gàng nhưng vẫn có badge 🔥 và 💎
-        item_lines = []
-        for grp in eligible_groups:
-            it = grp["sample"]
-            cnt = grp["count"]
-            lot_str = f" (x{cnt} lô)" if cnt > 1 else ""
-            grade_info = get_grade_info(it["grade"])
-            icon = grade_info.get("icon", "⚪")
-            cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
-            cat_icon = get_category_icon(cat)
-            cat_str = f"[{cat_icon}{cat}] "
-            price_str = format_price_str(it["gold"], it["silver"])
-            
-            # Badge
-            if grp.get("is_snipe"):
-                disc = grp.get("discount_percent", 0.0)
-                badge = f"🔥[-{disc:.0f}%] " if disc > 0 else "🔥[RẺ] "
-            elif grp.get("is_rare"):
-                badge = "💎[HIẾM] "
-            else:
-                badge = ""
+                CHUNK_SIZE = 8
+                chunks = [summary_lines[i:i + CHUNK_SIZE] for i in range(0, len(summary_lines), CHUNK_SIZE)]
+                total_parts = len(chunks)
+                deal_total = sum(int(g.get("count", 1) or 1) for g in priority_groups)
+                for part_idx, chunk in enumerate(chunks, 1):
+                    part_tag = f" ({part_idx}/{total_parts})" if total_parts > 1 else ""
+                    title = f"🔥 PHÁT HIỆN {deal_total} KÈO RẺ / WATCHLIST!{part_tag}"
+                    line1 = f"Danh sách cơ hội nổi bật (Phần {part_idx}/{total_parts}):" if total_parts > 1 else f"Có <b>{deal_total}</b> lô vật phẩm đạt tiêu chí săn:"
+                    WindowsNotifier.send_toast(title, line1, "\n".join(chunk))
 
-            unit_info = ""
-            if it["quantity"] > 1:
-                u_gold = round(it["gold"] / it["quantity"], 1) if it["gold"] > 0 else 0
-                if u_gold > 0:
-                    unit_info = f" <i>({u_gold} V/món)</i>"
+        # Chỉ gửi danh sách vật phẩm thường nếu cấu hình notify_mode = 'all'
+        if notify_mode == "all" and normal_groups:
+            normal_groups.sort(key=lambda g: -int(g["sample"].get("grade", 0) or 0))
+            item_lines = []
+            for grp in normal_groups:
+                it = grp["sample"]
+                cnt = int(grp.get("count", 1) or 1)
+                lot_str = f" (x{cnt} lô)" if cnt > 1 else ""
+                icon = get_grade_info(it["grade"]).get("icon", "⚪")
+                cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
+                cat_icon = get_category_icon(cat)
+                price_str = format_price_str(it["gold"], it["silver"])
+                unit_info = ""
+                if it["quantity"] > 1:
+                    if it["gold"] > 0:
+                        unit_info = f" <i>({round(it['gold'] / it['quantity'], 1):,} V/món)</i>"
+                    elif it["silver"] > 0:
+                        unit_info = f" <i>({round(it['silver'] / it['quantity']):,} Bạc/món)</i>"
+                m_itname = html.escape(normalize_item_name(str(it["name"])))
+                m_enh = html.escape(format_enhance_badge(it))
+                item_lines.append(
+                    f"[{cat_icon}{html.escape(cat)}] {icon} <b>{m_itname}</b>{m_enh} x{it['quantity']}{lot_str} — <b>{price_str}</b>{unit_info}"
+                )
 
-            m_itname = html.escape(str(it['name']))
-            item_lines.append(f"{badge}{cat_str}{icon} <b>{m_itname}</b> x{it['quantity']}{lot_str} — <b>{price_str}</b>{unit_info}")
-
-        CHUNK_SIZE = 10
-        chunks = [item_lines[i:i + CHUNK_SIZE] for i in range(0, len(item_lines), CHUNK_SIZE)]
-        total_parts = len(chunks)
-
-        for part_idx, chunk in enumerate(chunks, 1):
-            if total_parts == 1:
-                title = f"SỞ GIAO DỊCH: +{total_count} VẬT PHẨM MỚI!"
-                line1 = f"Tổng cộng có <b>+{total_count}</b> vật phẩm mới đăng sàn:"
-            else:
-                title = f"SỞ GIAO DỊCH: +{total_count} VẬT PHẨM MỚI! ({part_idx}/{total_parts})"
-                line1 = f"Danh sách vật phẩm mới tiếp theo (Phần {part_idx}/{total_parts}):"
-
-            line2 = "\n".join(chunk)
-            WindowsNotifier.send_toast(title, line1, line2)
-            if total_parts > 1:
-                time.sleep(0.5)
-
+            CHUNK_SIZE = 10
+            chunks = [item_lines[i:i + CHUNK_SIZE] for i in range(0, len(item_lines), CHUNK_SIZE)]
+            total_parts = len(chunks)
+            normal_total = sum(int(g.get("count", 1) or 1) for g in normal_groups)
+            for part_idx, chunk in enumerate(chunks, 1):
+                if total_parts == 1:
+                    title = f"SỞ GIAO DỊCH: +{normal_total} VẬT PHẨM MỚI"
+                    line1 = f"Tổng cộng có <b>+{normal_total}</b> vật phẩm mới đăng sàn:"
+                else:
+                    title = f"SỞ GIAO DỊCH: +{normal_total} VẬT PHẨM MỚI ({part_idx}/{total_parts})"
+                    line1 = f"Danh sách vật phẩm mới tiếp theo (Phần {part_idx}/{total_parts}):"
+                WindowsNotifier.send_toast(title, line1, "\n".join(chunk))
     def print_idle_status(self):
 
         """In log trạng thái gộp tại chỗ (in-place) không nhảy dòng, chỉ cập nhật thời gian đếm ngược."""
@@ -1927,9 +2060,126 @@ class MultiAccountMarketWatcher:
                         self.save_data(self.storage_char_file, self.known_characters)
                         print(f"[{curr_time}] \033[96m[CẬP NHẬT NHÂN VẬT]\033[0m Tổng: \033[93m{len(current_chars)}\033[0m | Mới: \033[92m+{len(new_ids)}\033[0m | Đã gỡ: \033[91m-{len(rem_ids)}\033[0m", flush=True)
 
+    def _evaluate_new_item_groups(
+        self,
+        current_items: Dict[int, Dict[str, Any]],
+        new_ids: Set[int],
+        market_cfg: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Nhóm vật phẩm mới, định giá đối chiếu mặt bằng đang bán và lịch sử, rồi kiểm tra Watchlist."""
+        grouped = group_identical_items(current_items, new_ids)
+        if not grouped:
+            return []
+
+        live_index: Dict[Tuple[str, int, int], List[Tuple[int, float, float]]] = {}
+        for gid, cur in current_items.items():
+            qty = max(1, int(cur.get("quantity", 1) or 1))
+            g = max(0, int(cur.get("gold", 0) or 0))
+            s = max(0, int(cur.get("silver", 0) or 0))
+            ug = round(g / qty, 2) if g > 0 else 0.0
+            us = round(s / qty, 1) if (g == 0 and s > 0) else 0.0
+            k = (normalize_item_name(cur.get("name", "")), int(cur.get("grade", 0) or 0), _get_equipment_enhance_tier(cur))
+            live_index.setdefault(k, []).append((gid, ug, us))
+
+        raw_wl = market_cfg.get("watchlist_keywords") or []
+        watchlist_kws = [str(kw).strip().lower() for kw in raw_wl if str(kw).strip()]
+        curr_time = time.strftime("%H:%M:%S")
+
+        for grp in grouped:
+            it = grp["sample"]
+            cnt = grp["count"]
+            gids = grp["gids"]
+            grp_gid_set = set(gids)
+            for gid in gids:
+                self.known_items[gid] = current_items[gid]
+
+            norm_name = normalize_item_name(it["name"])
+            grade = int(it.get("grade", 0) or 0)
+            tier = _get_equipment_enhance_tier(it)
+            idx_key = (norm_name, grade, tier)
+
+            other_gold: List[float] = []
+            other_silver: List[float] = []
+            for o_gid, o_ug, o_us in live_index.get(idx_key, []):
+                if o_gid in grp_gid_set:
+                    continue
+                if o_ug > 0:
+                    other_gold.append(o_ug)
+                elif o_us > 0:
+                    other_silver.append(o_us)
+
+            analysis = self.price_tracker.process_item_listing(
+                name=norm_name,
+                grade=grade,
+                quantity=it["quantity"],
+                gold=it["gold"],
+                silver=it["silver"],
+                is_new_listing=True,
+                good_id=gids[0],
+                enhance_tier=tier,
+                live_gold_prices=other_gold,
+                live_silver_prices=other_silver,
+                config=market_cfg,
+                record_sample=True
+            )
+
+            # Giới hạn ghi tối đa thêm 2 mẫu giống hệt trong cùng đợt để tránh 1 người bán xả 20 lô làm méo median
+            for extra_idx, extra_gid in enumerate(gids[1:]):
+                ex_it = current_items[extra_gid]
+                if extra_idx < 2:
+                    self.price_tracker.process_item_listing(
+                        name=norm_name,
+                        grade=grade,
+                        quantity=ex_it["quantity"],
+                        gold=ex_it["gold"],
+                        silver=ex_it["silver"],
+                        is_new_listing=True,
+                        good_id=extra_gid,
+                        enhance_tier=tier,
+                        config=market_cfg,
+                        record_sample=True
+                    )
+                else:
+                    self.price_tracker.mark_good_id_seen(extra_gid)
+
+            name_lower = norm_name.lower()
+            is_watchlist = bool(watchlist_kws and any(kw in name_lower for kw in watchlist_kws))
+
+            reasons = list(analysis.get("reasons", []))
+            if is_watchlist and "Khớp Watchlist săn đồ" not in reasons:
+                reasons.append("Khớp Watchlist săn đồ")
+
+            grp["analysis"] = analysis
+            grp["is_bargain"] = bool(analysis.get("is_bargain", False))
+            grp["is_watchlist"] = is_watchlist
+            grp["is_rare"] = False
+            grp["discount_percent"] = float(analysis.get("discount_percent", 0.0) or 0.0)
+            grp["estimated_profit_gold"] = float(analysis.get("estimated_profit_gold", 0.0) or 0.0)
+            grp["estimated_profit_silver"] = float(analysis.get("estimated_profit_silver", 0.0) or 0.0)
+            grp["reasons"] = reasons
+
+            cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
+            cat_icon = get_category_icon(cat)
+            cat_str = f"\033[94m[{cat_icon} {cat}]\033[0m "
+            enh_badge = format_enhance_badge(it)
+            colored_name = format_colored_item_name(f"{norm_name}{enh_badge}", grade)
+            price_display = format_price_str(it["gold"], it["silver"])
+            lot_str = f" \033[93m(x{cnt} lô)\033[0m" if cnt > 1 else ""
+            tag = ""
+            if grp["is_bargain"]:
+                tag = f" \033[91m[KÈO RẺ -{grp['discount_percent']:.0f}%]\033[0m" if grp["discount_percent"] > 0 else " \033[91m[KÈO RẺ]\033[0m"
+            elif is_watchlist:
+                tag = " \033[96m[WATCHLIST]\033[0m"
+            print(f"[{curr_time}] [VẬT PHẨM MỚI]{tag} {cat_str}{colored_name} x{it['quantity']}{lot_str} | Giá: {price_display}", flush=True)
+
+        return grouped
+
     def do_item_scan_step(self, worker: WatcherWorker):
         """Tiến trình quét Sở Giao Dịch Vật Phẩm (Acc 2)."""
-        self.next_item_scan_time = time.time() + getattr(self, "scan_interval", 15.0)
+        market_cfg = self._load_market_config()
+        self.scan_interval = float(market_cfg.get("scan_interval_sec", getattr(self, "scan_interval", 15.0)))
+        self.next_item_scan_time = time.time() + self.scan_interval
+
         ok, current_items, err = worker.fetch_market_items()
         if not ok:
             with self.print_lock:
@@ -1940,79 +2190,35 @@ class MultiAccountMarketWatcher:
                 TeleNotifier.get_instance().send_error_alert(f"Lỗi Quét Vật Phẩm (Acc {worker.idx})", f"Tài khoản: {worker.user}\nLỗi: {err}", source="SGD Vật Phẩm", cooldown=120.0)
             except Exception:
                 pass
-            # Kiểm tra xem có bị rời khỏi map Tân Nguyệt Trấn không, nếu có thì tự động dịch chuyển lại
             worker.ensure_npc_and_map()
             return
 
         curr_time = time.strftime("%H:%M:%S")
         with self.item_lock:
-            # Luôn cập nhật kiến thức giá cho toàn bộ vật phẩm đang bày bán trên sàn
-            for it in current_items.values():
-                try:
-                    self.price_tracker.process_item_listing(
-                        name=it["name"],
-                        grade=it["grade"],
-                        quantity=it["quantity"],
-                        gold=it["gold"],
-                        silver=it["silver"],
-                        is_new_listing=False
-                    )
-                except Exception:
-                    pass
-
             if not self.initialized_items:
                 if not self.has_saved_items or (len(current_items) - len(self.known_items) > 100):
+                    added = self.price_tracker.record_baseline_snapshot(current_items)
                     self.known_items = current_items
                     self.save_data(self.storage_item_file, self.known_items)
                     self.price_tracker.save_checkpoint()
                     with self.print_lock:
                         self.clear_in_place_line()
-                        print(f"[{curr_time}] \033[92m[KHỞI TẠO VẬT PHẨM TOÀN SÀN]\033[0m Đã nạp \033[93m{len(self.known_items)}\033[0m vật phẩm (Kiếm, Đao, Súng, Pet, Giáp, Khác...) vào bộ nhớ & CSDL giá.", flush=True)
+                        print(f"[{curr_time}] \033[92m[KHỞI TẠO VẬT PHẨM TOÀN SÀN]\033[0m Đã nạp \033[93m{len(self.known_items)}\033[0m vật phẩm (ghi mới \033[96m{added}\033[0m mẫu vào CSDL giá).", flush=True)
                 else:
                     curr_ids = set(current_items.keys())
                     known_ids = set(self.known_items.keys())
                     new_ids = curr_ids - known_ids
                     rem_ids = known_ids - curr_ids
 
+                    # Bổ sung baseline cho các món cũ trên sàn nếu chưa từng được ghi vào seen_good_ids
+                    existing_items = {gid: it for gid, it in current_items.items() if gid not in new_ids}
+                    self.price_tracker.record_baseline_snapshot(existing_items)
+
                     with self.print_lock:
                         self.clear_in_place_line()
                         print(f"[{curr_time}] \033[96m[SO SÁNH VẬT PHẨM LẦN TRƯỚC]\033[0m Tổng sàn: \033[93m{len(current_items)}\033[0m | Mới: \033[92m+{len(new_ids)}\033[0m | Đã gỡ: \033[91m-{len(rem_ids)}\033[0m", flush=True)
                         if new_ids:
-                            grouped = group_identical_items(current_items, new_ids)
-                            for grp in grouped:
-                                it = grp["sample"]
-                                cnt = grp["count"]
-                                for gid in grp["gids"]:
-                                    self.known_items[gid] = current_items[gid]
-
-                                # Phân tích giá thông minh
-                                analysis = self.price_tracker.process_item_listing(
-                                    name=it["name"],
-                                    grade=it["grade"],
-                                    quantity=it["quantity"],
-                                    gold=it["gold"],
-                                    silver=it["silver"],
-                                    is_new_listing=True
-                                )
-                                grp["analysis"] = analysis
-                                grp["is_bargain"] = analysis.get("is_bargain", False)
-                                grp["is_rare"] = analysis.get("is_rare", False)
-                                grp["discount_percent"] = analysis.get("discount_percent", 0.0)
-                                grp["reasons"] = analysis.get("reasons", [])
-
-                                cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
-                                cat_icon = get_category_icon(cat)
-                                cat_str = f"\033[94m[{cat_icon} {cat}]\033[0m "
-                                colored_name = format_colored_item_name(it["name"], it["grade"])
-                                price_display = format_price_str(it["gold"], it["silver"])
-                                lot_str = f" \033[93m(x{cnt} lô)\033[0m" if cnt > 1 else ""
-                                tag = ""
-                                if grp["is_bargain"]:
-                                    tag = f" \033[91m[KÈO RẺ -{grp['discount_percent']:.0f}%]\033[0m" if grp["discount_percent"] > 0 else " \033[91m[KÈO RẺ]\033[0m"
-                                elif grp["is_rare"]:
-                                    tag = " \033[95m[ĐỒ HIẾM]\033[0m"
-                                print(f"[{curr_time}] [VẬT PHẨM MỚI]{tag} {cat_str}{colored_name} x{it['quantity']}{lot_str} | Giá: {price_display}", flush=True)
-
+                            grouped = self._evaluate_new_item_groups(current_items, new_ids, market_cfg)
                             self.notify_new_items(grouped, len(new_ids))
 
                         if rem_ids:
@@ -2032,48 +2238,15 @@ class MultiAccountMarketWatcher:
                         self.clear_in_place_line()
 
                         if len(new_ids) > 100:
-                            print(f"[{curr_time}] \033[93m[SGD - ĐỒNG BỘ LẠI]\033[0m Phát hiện số lượng thay đổi đột biến (+{len(new_ids)} món), cập nhật baseline để tránh spam.", flush=True)
+                            added = self.price_tracker.record_baseline_snapshot(current_items)
+                            print(f"[{curr_time}] \033[93m[SGD - ĐỒNG BỘ LẠI]\033[0m Phát hiện số lượng thay đổi đột biến (+{len(new_ids)} món), cập nhật baseline (+{added} mẫu mới) để tránh spam.", flush=True)
                             self.known_items = current_items
                             self.save_data(self.storage_item_file, self.known_items)
                             self.price_tracker.save_checkpoint()
                             return
 
                         if new_ids:
-                            grouped = group_identical_items(current_items, new_ids)
-                            for grp in grouped:
-                                it = grp["sample"]
-                                cnt = grp["count"]
-                                for gid in grp["gids"]:
-                                    self.known_items[gid] = current_items[gid]
-
-                                # Phân tích giá thông minh
-                                analysis = self.price_tracker.process_item_listing(
-                                    name=it["name"],
-                                    grade=it["grade"],
-                                    quantity=it["quantity"],
-                                    gold=it["gold"],
-                                    silver=it["silver"],
-                                    is_new_listing=True
-                                )
-                                grp["analysis"] = analysis
-                                grp["is_bargain"] = analysis.get("is_bargain", False)
-                                grp["is_rare"] = analysis.get("is_rare", False)
-                                grp["discount_percent"] = analysis.get("discount_percent", 0.0)
-                                grp["reasons"] = analysis.get("reasons", [])
-
-                                cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
-                                cat_icon = get_category_icon(cat)
-                                cat_str = f"\033[94m[{cat_icon} {cat}]\033[0m "
-                                colored_name = format_colored_item_name(it["name"], it["grade"])
-                                price_display = format_price_str(it["gold"], it["silver"])
-                                lot_str = f" \033[93m(x{cnt} lô)\033[0m" if cnt > 1 else ""
-                                tag = ""
-                                if grp["is_bargain"]:
-                                    tag = f" \033[91m[KÈO RẺ -{grp['discount_percent']:.0f}%]\033[0m" if grp["discount_percent"] > 0 else " \033[91m[KÈO RẺ]\033[0m"
-                                elif grp["is_rare"]:
-                                    tag = " \033[95m[ĐỒ HIẾM]\033[0m"
-                                print(f"[{curr_time}] [VẬT PHẨM MỚI]{tag} {cat_str}{colored_name} x{it['quantity']}{lot_str} | Giá: {price_display}", flush=True)
-
+                            grouped = self._evaluate_new_item_groups(current_items, new_ids, market_cfg)
                             self.notify_new_items(grouped, len(new_ids))
 
                         if rem_ids:

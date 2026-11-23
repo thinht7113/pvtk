@@ -799,16 +799,17 @@ class TelegramBot:
             tracker = ItemPriceTracker(db_path="storage/item_price_history.json")
             results = tracker.query_item_price(keyword)
 
+        safe_kw = html.escape(keyword)
         if not results:
             self.send_message(
-                f"❌ <b>Không tìm thấy dữ liệu giá cho từ khóa '<code>{keyword}</code>'.</b>\n"
+                f"❌ <b>Không tìm thấy dữ liệu giá cho từ khóa '<code>{safe_kw}</code>'.</b>\n"
                 f"<i>Vật phẩm có thể chưa từng được bày bán trên Sở Giao Dịch kể từ khi bot chạy.</i>",
                 chat_id
             )
             return
 
         lines = [
-            f"📊 <b>THỐNG KÊ GIÁ THỊ TRƯỜNG: '{keyword.upper()}'</b>",
+            f"📊 <b>THỐNG KÊ GIÁ THỊ TRƯỜNG: '{safe_kw.upper()}'</b>",
             f"<i>(Tìm thấy {len(results)} loại vật phẩm phù hợp trong lịch sử sàn)</i>",
             "━━━━━━━━━━━━━━━━━━━━━━"
         ]
@@ -816,7 +817,9 @@ class TelegramBot:
         from modules.character_market_watcher import get_grade_info
         for r in results:
             name = r.get("name", "")
+            safe_name = html.escape(str(name))
             grade = r.get("grade", 0)
+            enhance_tag = " [+CH]" if int(r.get("enhance_tier", 0) or 0) > 0 else ""
             g_info = get_grade_info(grade)
             icon = g_info.get("icon", "⚪")
             grade_name = g_info.get("name", "")
@@ -826,27 +829,29 @@ class TelegramBot:
             total_seen = r.get("total_listings_seen", 0)
             last_seen = r.get("last_seen", "N/A")
 
-            lines.append(f"{icon} <b>{name}</b> <i>({grade_name})</i>")
+            lines.append(f"{icon} <b>{safe_name}{enhance_tag}</b> <i>({grade_name})</i>")
 
-            # Thống kê Vàng
+            # Thống kê Vàng (ưu tiên Trung vị để phản ánh giá thật)
             g_samples = g_stats.get("sample_count", 0)
             if g_samples > 0:
-                g_avg = g_stats.get("avg_unit_price", 0)
-                g_min = g_stats.get("min_unit_price", 0)
-                g_max = g_stats.get("max_unit_price", 0)
-                g_med = g_stats.get("median_unit_price", 0)
-                lines.append(f"   💰 <b>Vàng:</b> Đơn giá TB: <b>{g_avg:,.1f} V/món</b> <i>(Trung vị: {g_med:,.1f} V)</i>")
-                lines.append(f"      • Rẻ nhất: <b>{g_min:,.1f} V</b> | Đắt nhất: <b>{g_max:,.1f} V</b> <i>({g_samples} lượt bán)</i>")
+                g_avg = float(g_stats.get("avg_unit_price", 0) or 0)
+                g_min = float(g_stats.get("min_unit_price") or 0)
+                g_max = float(g_stats.get("max_unit_price") or 0)
+                g_med = float(g_stats.get("median_unit_price", 0) or 0)
+                lines.append(f"   💰 <b>Vàng:</b> Đơn giá Trung vị: <b>{g_med:,.1f} V/món</b> <i>(TB: {g_avg:,.1f} V)</i>")
+                lines.append(f"      • Đáy gần đây: <b>{g_min:,.1f} V</b> | Đỉnh gần đây: <b>{g_max:,.1f} V</b> <i>({g_samples} lô)</i>")
 
-            # Thống kê Bạc
+            # Thống kê Bạc (chỉ các lô thuần Bạc, ưu tiên Trung vị)
             s_samples = s_stats.get("sample_count", 0)
             if s_samples > 0:
-                s_avg = s_stats.get("avg_unit_price", 0)
-                s_min = s_stats.get("min_unit_price", 0)
-                s_max = s_stats.get("max_unit_price", 0)
-                lines.append(f"   🪙 <b>Bạc:</b> Đơn giá TB: <b>{s_avg:,.0f} Bạc/món</b> <i>(Đáy: {s_min:,.0f} | Đỉnh: {s_max:,.0f})</i>")
+                s_avg = float(s_stats.get("avg_unit_price", 0) or 0)
+                s_min = float(s_stats.get("min_unit_price") or 0)
+                s_max = float(s_stats.get("max_unit_price") or 0)
+                s_med = float(s_stats.get("median_unit_price", 0) or 0)
+                lines.append(f"   🪙 <b>Bạc:</b> Đơn giá Trung vị: <b>{s_med:,.0f} Bạc/món</b> <i>(TB: {s_avg:,.0f} Bạc)</i>")
+                lines.append(f"      • Đáy gần đây: <b>{s_min:,.0f}</b> | Đỉnh gần đây: <b>{s_max:,.0f}</b> <i>({s_samples} lô)</i>")
 
-            lines.append(f"   ⏱ <i>Đã thấy {total_seen} lần trên sàn | Gần nhất: {last_seen}</i>\n")
+            lines.append(f"   ⏱ <i>Đã ghi nhận {total_seen} lô khác nhau | Gần nhất: {last_seen}</i>\n")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         self.send_message("\n".join(lines), chat_id)
