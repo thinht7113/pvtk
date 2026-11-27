@@ -2298,10 +2298,6 @@ class MultiAccountMarketWatcher:
 
     def run(self):
         self.is_running = True
-        try:
-            FreeProxyManager.stop_background_worker()
-        except Exception:
-            pass
 
         print("\n" + "=" * 80)
         print("  GIÁM SÁT SỞ GIAO DỊCH & ĐOẠT LÌ XÌ ĐA TÀI KHOẢN (5 ACC)")

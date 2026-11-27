@@ -172,6 +172,8 @@ class BaseAccountRunner:
             self.active_workers_count += 1
         try:
             retries = 0
+            proxy_wait_count = 0
+            max_proxy_waits = 20
             last_res = None
             
             accumulated_chars: Dict[str, Dict[str, Any]] = {}
@@ -209,7 +211,18 @@ class BaseAccountRunner:
 
                 if self.is_stopped():
                     break
-                
+
+                # Wait for live proxy replenishment without burning login retry attempts
+                if self.proxy_rotation and res and res.get("error") == "Đang chờ proxy sống":
+                    proxy_wait_count += 1
+                    if proxy_wait_count >= max_proxy_waits:
+                        break
+                    if self._wait_interruptible(5.0):
+                        break
+                    continue
+
+                proxy_wait_count = 0
+
                 # Otherwise, we retry
                 retries += 1
                 if retries < self.max_retries and not self.is_stopped():
@@ -217,7 +230,7 @@ class BaseAccountRunner:
                     # Rotate Proxy on retry if enabled (never fall back to VPS direct IP)
                     if self.proxy_rotation and len(task) >= 5:
                         try:
-                            old_proxy = task[4]
+                            old_proxy = (res.get("last_proxy") if res else None) or task[4]
                             new_proxy = FreeProxyManager.acquire_proxy(exclude_proxy=old_proxy)
                             if new_proxy and new_proxy != old_proxy:
                                 task_list = list(task)
@@ -225,6 +238,9 @@ class BaseAccountRunner:
                                 task = tuple(task_list)
                                 self.log(f"\n\033[93m[ĐỔI PROXY THÀNH CÔNG]\033[0m {task[2]} chuyển từ {old_proxy} sang {new_proxy}")
                             elif not new_proxy:
+                                task_list = list(task)
+                                task_list[4] = None
+                                task = tuple(task_list)
                                 wait_sec = 3.0
                         except Exception as e:
                             self.log(f"\n\033[91m[LỖI ĐỔI PROXY]\033[0m {e}")
@@ -358,12 +374,14 @@ class BaseAccountRunner:
 
         if self.is_stopped():
             account_result["error"] = "Dừng bởi người dùng"
+            account_result["last_proxy"] = current_proxy
             if self.proxy_rotation:
                 FreeProxyManager.release_proxy(current_proxy)
             return account_result
 
         if not login_data:
             account_result["error"] = err_reason
+            account_result["last_proxy"] = current_proxy
             self.log(f"{thread_tag} [LỖI ĐĂNG NHẬP] {err_reason}")
             if self.proxy_rotation:
                 FreeProxyManager.release_proxy(current_proxy)
@@ -378,6 +396,7 @@ class BaseAccountRunner:
         game_conn = AuthManager.connect_game_server(g_host, g_port, ukey, session_id, proxy=current_proxy)
         if not game_conn:
             account_result["error"] = "Không kết nối được Game Server"
+            account_result["last_proxy"] = current_proxy
             self.log(f"{thread_tag} [LỖI KẾT NỐI] Không kết nối được Game Server")
             if self.proxy_rotation:
                 FreeProxyManager.release_proxy(current_proxy)

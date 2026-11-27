@@ -35,7 +35,7 @@ class FreeProxyManager:
     MIN_FILE_RECHECK_INTERVAL = 60.0
     MAX_RESERVOIR_CANDIDATES = 1500
     CHECK_WORKERS = 20
-    DEAD_FAIL_THRESHOLD = 2
+    DEAD_FAIL_THRESHOLD = 3
     MAX_SAVED_PROXIES = 500
     
     @classmethod
@@ -196,7 +196,7 @@ class FreeProxyManager:
 
                 if file_candidates:
                     random.shuffle(file_candidates)
-                    sample_list = file_candidates[:150]
+                    sample_list = file_candidates[:200]
                     valid_from_file = cls._check_candidates_pool(sample_list, target_valid=50)
                     if valid_from_file:
                         cls._merge_proxies(valid_from_file)
@@ -210,21 +210,22 @@ class FreeProxyManager:
             if cls._stop_event.is_set():
                 return
 
-            # Phase 2 — Rate-Limited Streaming Web Scrape with Reservoir Sampling
+            # Phase 2 — Rate-Limited Streaming Web Scrape (VN priority + Reservoir Sampling)
             now = time.time()
             with cls._lock:
                 pool_size = len(cls._proxies)
                 existing_set = set(cls._proxies)
-            cooldown = cls.EMPTY_POOL_WEB_COOLDOWN if pool_size == 0 else cls.MIN_WEB_FETCH_INTERVAL
+            cooldown = cls.EMPTY_POOL_WEB_COOLDOWN if pool_size < 5 else cls.MIN_WEB_FETCH_INTERVAL
             if now - cls._last_web_fetch < cooldown:
                 return
             cls._last_web_fetch = now
 
             print("\n\033[93m[AUTO PROXY]\033[0m Đang tìm kiếm Proxy SOCKS5 miễn phí (Ưu tiên Việt Nam)...")
 
+            vn_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=VN&ssl=all&anonymity=all"
             urls = [
                 # Vietnamese proxies first (priority)
-                "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=VN&ssl=all&anonymity=all",
+                vn_url,
                 # Global SOCKS5 from multiple providers
                 "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all",
                 "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
@@ -252,10 +253,13 @@ class FreeProxyManager:
             total_seen = 0
             max_bytes_per_url = 2 * 1024 * 1024
             max_lines_per_url = 30000
+            vn_candidates = []
+            max_vn_candidates = 300
 
             for url in urls:
                 if cls._stop_event.is_set():
                     break
+                is_vn_url = (url == vn_url)
                 try:
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=4) as resp:
@@ -273,31 +277,50 @@ class FreeProxyManager:
                             if not line or ":" not in line or len(line) > 64:
                                 continue
                             total_seen += 1
-                            if len(reservoir) < cap:
-                                reservoir.append(line)
+                            if is_vn_url:
+                                if len(vn_candidates) < max_vn_candidates:
+                                    vn_candidates.append(line)
                             else:
-                                j = random.randrange(total_seen)
-                                if j < cap:
-                                    reservoir[j] = line
+                                if len(reservoir) < cap:
+                                    reservoir.append(line)
+                                else:
+                                    j = random.randrange(total_seen)
+                                    if j < cap:
+                                        reservoir[j] = line
                 except Exception:
                     pass
 
             if cls._stop_event.is_set():
                 return
 
-            if reservoir:
-                unique_list = []
+            if vn_candidates or reservoir:
+                unique_vn = []
+                unique_global = []
                 seen = set()
+                for p in vn_candidates:
+                    if p not in seen and f"socks5://{p}" not in existing_set:
+                        unique_vn.append(p)
+                        seen.add(p)
                 for p in reservoir:
                     if p not in seen and f"socks5://{p}" not in existing_set:
-                        unique_list.append(p)
+                        unique_global.append(p)
                         seen.add(p)
 
-                random.shuffle(unique_list)
-                test_candidates = unique_list[:200]
+                random.shuffle(unique_global)
+                unique_list = unique_vn + unique_global
+                test_candidates = unique_list[:600]
 
-                print(f"\033[93m[AUTO PROXY]\033[0m Đã lấy mẫu {len(unique_list)} proxies (từ {total_seen} dòng web). Đang kiểm tra {len(test_candidates)} ứng viên...")
-                valid_proxies = cls._check_candidates_pool(test_candidates, target_valid=50)
+                print(f"\033[93m[AUTO PROXY]\033[0m Đã lấy mẫu {len(unique_list)} proxies (VN: {len(unique_vn)}, tổng dòng web: {total_seen}). Đang kiểm tra tối đa {len(test_candidates)} ứng viên...")
+                valid_proxies = []
+                target_total = 30
+                for start_idx in range(0, len(test_candidates), 200):
+                    if cls._stop_event.is_set() or len(valid_proxies) >= target_total:
+                        break
+                    wave = test_candidates[start_idx:start_idx + 200]
+                    remaining = target_total - len(valid_proxies)
+                    wave_valid = cls._check_candidates_pool(wave, target_valid=remaining)
+                    if wave_valid:
+                        valid_proxies.extend(wave_valid)
 
                 if valid_proxies:
                     cls._merge_proxies(valid_proxies)
