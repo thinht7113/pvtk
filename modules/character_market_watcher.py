@@ -10,6 +10,7 @@ Hỗ trợ đa tài khoản (tối đa 4 tài khoản từ accountsNV.txt):
 
 import sys
 import os
+import re
 import time
 import json
 import base64
@@ -1561,7 +1562,9 @@ class MultiAccountMarketWatcher:
             "min_profit_gold": 10.0,
             "min_samples": 3,
             "silver_per_gold": 50000.0,
-            "watchlist_keywords": []
+            "watchlist_keywords": [],
+            "excluded_categories": [],
+            "excluded_category_exceptions": []
         }
         try:
             if os.path.exists(self.config_path):
@@ -1832,6 +1835,16 @@ class MultiAccountMarketWatcher:
         notify_mode = str(market_cfg.get("notify_mode", "deals_only")).strip().lower()
         min_grade = int(market_cfg.get("item_min_grade", 0) or 0)
         tracked_cats = market_cfg.get("tracked_categories", ["Tất cả"])
+        excluded_cats = {
+            str(c).strip().lower()
+            for c in (market_cfg.get("excluded_categories") or [])
+            if str(c).strip()
+        }
+        excluded_cat_exceptions = [
+            str(kw).strip().lower()
+            for kw in (market_cfg.get("excluded_category_exceptions") or [])
+            if str(kw).strip()
+        ]
         silver_per_gold = float(market_cfg.get("silver_per_gold", 50000.0) or 50000.0)
 
         allow_all_cats = True
@@ -1844,12 +1857,20 @@ class MultiAccountMarketWatcher:
         for grp in grouped:
             it = grp["sample"]
             cat = it.get("category", get_sgd_broad_category(it.get("type", -1)))
-            if not allow_all_cats and cat not in tracked_cats:
+            is_watchlist = bool(grp.get("is_watchlist", False))
+            norm_name_lower = normalize_item_name(str(it.get("name", ""))).strip().lower()
+            is_cat_exception = any(
+                bool(re.search(rf'(?<!\w){re.escape(exc)}(?!\w)', norm_name_lower))
+                for exc in excluded_cat_exceptions
+            )
+
+            if cat.strip().lower() in excluded_cats and not (is_cat_exception or is_watchlist):
+                continue
+            if not allow_all_cats and cat not in tracked_cats and not (is_cat_exception or is_watchlist):
                 continue
 
             analysis = grp.get("analysis", {})
             is_bargain = bool(grp.get("is_bargain", False) or analysis.get("is_bargain", False))
-            is_watchlist = bool(grp.get("is_watchlist", False))
             grade = int(it.get("grade", 0) or 0)
 
             grp["is_snipe"] = is_bargain
