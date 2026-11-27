@@ -1564,7 +1564,8 @@ class MultiAccountMarketWatcher:
             "silver_per_gold": 50000.0,
             "watchlist_keywords": [],
             "excluded_categories": [],
-            "excluded_category_exceptions": []
+            "excluded_category_exceptions": [],
+            "category_min_grade": {}
         }
         try:
             if os.path.exists(self.config_path):
@@ -1845,6 +1846,16 @@ class MultiAccountMarketWatcher:
             for kw in (market_cfg.get("excluded_category_exceptions") or [])
             if str(kw).strip()
         ]
+        raw_cat_min = market_cfg.get("category_min_grade") or {}
+        cat_min_grade_map: Dict[str, int] = {}
+        if isinstance(raw_cat_min, dict):
+            for k, v in raw_cat_min.items():
+                ks = str(k).strip().lower()
+                if ks:
+                    try:
+                        cat_min_grade_map[ks] = int(v)
+                    except (TypeError, ValueError):
+                        pass
         silver_per_gold = float(market_cfg.get("silver_per_gold", 50000.0) or 50000.0)
 
         allow_all_cats = True
@@ -1872,6 +1883,7 @@ class MultiAccountMarketWatcher:
             analysis = grp.get("analysis", {})
             is_bargain = bool(grp.get("is_bargain", False) or analysis.get("is_bargain", False))
             grade = int(it.get("grade", 0) or 0)
+            effective_min_grade = max(min_grade, cat_min_grade_map.get(cat.strip().lower(), min_grade))
 
             grp["is_snipe"] = is_bargain
             grp["is_bargain"] = is_bargain
@@ -1879,9 +1891,9 @@ class MultiAccountMarketWatcher:
             grp["is_rare"] = False
 
             if is_bargain or is_watchlist:
-                if is_watchlist or grade >= min_grade:
+                if is_watchlist or grade >= effective_min_grade:
                     priority_groups.append(grp)
-            elif notify_mode == "all" and grade >= min_grade:
+            elif notify_mode == "all" and grade >= effective_min_grade:
                 normal_groups.append(grp)
 
         # Ưu tiên gửi riêng từng Kèo Rẻ / Watchlist để không bị chìm thông tin định giá
