@@ -1565,7 +1565,9 @@ class MultiAccountMarketWatcher:
             "watchlist_keywords": [],
             "excluded_categories": [],
             "excluded_category_exceptions": [],
-            "category_min_grade": {}
+            "category_min_grade": {},
+            "excluded_name_keywords": [],
+            "excluded_name_exceptions": []
         }
         try:
             if os.path.exists(self.config_path):
@@ -1856,6 +1858,16 @@ class MultiAccountMarketWatcher:
                         cat_min_grade_map[ks] = int(v)
                     except (TypeError, ValueError):
                         pass
+        excluded_name_kws = [
+            str(kw).strip().lower()
+            for kw in (market_cfg.get("excluded_name_keywords") or [])
+            if str(kw).strip()
+        ]
+        excluded_name_excs = [
+            str(kw).strip().lower()
+            for kw in (market_cfg.get("excluded_name_exceptions") or [])
+            if str(kw).strip()
+        ]
         silver_per_gold = float(market_cfg.get("silver_per_gold", 50000.0) or 50000.0)
 
         allow_all_cats = True
@@ -1878,6 +1890,11 @@ class MultiAccountMarketWatcher:
             if cat.strip().lower() in excluded_cats and not (is_cat_exception or is_watchlist):
                 continue
             if not allow_all_cats and cat not in tracked_cats and not (is_cat_exception or is_watchlist):
+                continue
+
+            is_name_excluded = any(kw in norm_name_lower for kw in excluded_name_kws)
+            is_name_exception = any(exc in norm_name_lower for exc in excluded_name_excs)
+            if is_name_excluded and not (is_name_exception or is_watchlist):
                 continue
 
             analysis = grp.get("analysis", {})
